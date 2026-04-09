@@ -1,0 +1,14 @@
+# Hardware drivers / SDKs (install separately if not on PyPI)
+# - pyzed (ZED SDK Python bindings)
+# - xarm-python-sdk
+
+opencv-python>=4.8
+numpy>=1.24
+pyyaml>=6.0
+pupil-apriltags>=1.0.4
+openai>=1.30          # OpenAI-compatible chat completions client
+
+# Optional: only needed for Plan A (OWL-ViT zero-shot detection)
+transformers>=4.40
+torch>=2.1
+pillow>=10.0

@@ -1,0 +1,31 @@
+# Prompt2Pose runtime configuration
+
+llm:
+  # OpenAI default
+  api_key: "REPLACE_ME_WITH_OPENAI_KEY"
+  model: "gpt-4o-mini"
+  base_url: null         # null = api.openai.com
+  temperature: 0.0
+
+  # ----- Alternative providers (uncomment one) -------------------------------
+  # Ollama (local, no key needed):
+  # api_key: "ollama"
+  # model: "qwen2.5"
+  # base_url: "http://localhost:11434/v1"
+  #
+  # OpenRouter (gives Claude / Gemini through one OpenAI-compatible endpoint):
+  # api_key: "sk-or-..."
+  # model: "anthropic/claude-3.5-sonnet"
+  # base_url: "https://openrouter.ai/api/v1"
+
+camera:
+  fps: 15
+
+detector:
+  backend: owlvit          # "owlvit" (Plan A) or "hsv" (Plan B fallback)
+  model_id: "google/owlv2-base-patch16-ensemble"
+  threshold: 0.1
+  min_area_px: 200
+
+robot:
+  ip: "192.168.1.xxx"      # Lite6 controller IP — REPLACE WITH YOUR ROBOT
