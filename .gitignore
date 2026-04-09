@@ -1,6 +1,7 @@
 # Python cache
 __pycache__/
 *.py[cod]
+*$py.class
 
 # Test / type / lint cache
 .pytest_cache/
@@ -8,23 +9,105 @@ __pycache__/
 .ruff_cache/
 .pytest_tmp/
 pytest-cache-files-*/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+htmlcov/
+coverage.xml
+nosetests.xml
+*.cover
+*.py,cover
 
 # Virtual environments
 .venv/
 env/
 venv/
+ENV/
+env.bak/
+venv.bak/
+conda-meta/
 
-# IDE
+# IDE / editor
 .vscode/
 .idea/
+.spyderproject
+.spyproject
+.ropeproject
 
 # Logs / temp outputs
 logs/
+outputs/
+artifacts/
+tmp/
+temp/
 *.log
 tree_all.txt
 all_files_fullpath.txt
 depth3_listing.txt
 
+# Jupyter
+.ipynb_checkpoints/
+
 # OS junk
 Thumbs.db
 .DS_Store
+
+# Build / packaging
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# C / binary / extension artifacts
+*.so
+*.dll
+*.dylib
+*.pyd
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Notebook / local runtime / misc
+.python-version
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+site/
+
+# Environment files
+.env
+.envrc
+
+# Model / large binary artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Local raw / intermediate data
+data/raw/
+data/intermediate/
+*.npy
+*.npz
+
+# Optional AI/editor metadata
+.cursorignore
+.cursorindexingignore
