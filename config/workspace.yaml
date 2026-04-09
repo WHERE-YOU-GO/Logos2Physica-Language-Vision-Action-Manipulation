@@ -1,0 +1,24 @@
+table_height_m: 0.0
+default_object_half_height_m: 0.02
+place_margin_m: 0.01
+default_place_xy_m:
+  - 0.35
+  - 0.0
+xyz_min_m:
+  - 0.15
+  - -0.35
+  - 0.02
+xyz_max_m:
+  - 0.75
+  - 0.35
+  - 0.45
+named_areas:
+  yellow area:
+    - 0.45
+    - 0.15
+  left area:
+    - 0.35
+    - 0.20
+  right area:
+    - 0.35
+    - -0.20

@@ -1,0 +1,14 @@
+approach_height_m: 0.08
+retreat_height_m: 0.10
+default_gripper_width_m: 0.045
+table_clearance_m: 0.01
+pick_speed_scale: 0.2
+place_speed_scale: 0.25
+place_approach_height_m: 0.10
+gripper_settle_time_s: 0.2
+linear_speed: 50.0
+joint_speed: 30.0
+angles_in_degrees: true
+ik_backend: ""
+moveit_enabled: false
+robot_ip: ""

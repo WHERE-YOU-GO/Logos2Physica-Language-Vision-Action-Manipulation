@@ -1,0 +1,11 @@
+model_path: yolov8s-world.pt
+score_thresh: 0.2
+iou_thresh: 0.5
+backend: yolo_world
+florence2:
+  model_id: microsoft/Florence-2-base
+owlv2:
+  model_id: google/owlv2-base-patch16-ensemble
+groundingdino:
+  config_file: ""
+  weights_path: ""

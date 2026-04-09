@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Test / type / lint cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_tmp/
+pytest-cache-files-*/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs / temp outputs
+logs/
+*.log
+tree_all.txt
+all_files_fullpath.txt
+depth3_listing.txt
+
+# OS junk
+Thumbs.db
+.DS_Store

@@ -1,0 +1,19 @@
+intrinsics:
+  fx: 700.0
+  fy: 700.0
+  cx: 640.0
+  cy: 360.0
+  width: 1280
+  height: 720
+resolution: HD720
+fps: 30
+depth_mode: QUALITY
+coordinate_units: METER
+tag_size_m: 0.04
+tag_id: 0
+extrinsics_cache_path: config/T_base_cam.npy
+T_base_cam:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0, 0.0]
+  - [0.0, 0.0, 1.0, 0.0]
+  - [0.0, 0.0, 0.0, 1.0]
