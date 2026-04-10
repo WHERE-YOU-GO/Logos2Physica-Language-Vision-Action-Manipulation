@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
+from common.path_manager import resolve_path
 from eval.metrics import task_success_rate
 
 try:
@@ -22,7 +22,7 @@ class BenchmarkCase:
 
 
 def load_benchmark_cases(path: str) -> list[BenchmarkCase]:
-    path_obj = Path(path).expanduser()
+    path_obj = resolve_path(path)
     if not path_obj.exists():
         raise FileNotFoundError(f"Benchmark case file does not exist: {path_obj}")
 

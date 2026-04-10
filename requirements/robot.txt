@@ -1,0 +1,6 @@
+# Optional robot stack layer.
+# Python packages only. System-level dependencies such as ROS 2, ZED SDK, udev rules,
+# and vendor drivers must be installed separately on the target lab machine.
+
+xArm-Python-SDK
+pyserial

@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from pathlib import Path
 from typing import Any
+
+from common.path_manager import resolve_path
 
 
 class RunLogger:
     def __init__(self, save_dir: str) -> None:
-        self._save_dir = Path(save_dir).expanduser()
+        self._save_dir = resolve_path(save_dir)
         self._save_dir.mkdir(parents=True, exist_ok=True)
         self._current_run: dict[str, Any] | None = None
 

@@ -9,6 +9,7 @@ from common.config_loader import load_camera_config
 from common.datatypes import CameraIntrinsics
 from common.exceptions import ProjectError
 from common.logger import ProjectLogger
+from common.path_manager import resolve_path
 from common.transforms import invert_transform, make_transform
 
 try:
@@ -29,13 +30,13 @@ except ImportError:  # pragma: no cover
 
 class AprilTagCalibrator:
     def __init__(self, config_path: str, logger: ProjectLogger) -> None:
-        self._config_path = str(Path(config_path))
+        self._config_path = str(resolve_path(config_path))
         self._logger = logger
         self._config = self._load_config()
         self._tag_size_m = float(self._config.get("tag_size_m", 0.04))
         self._tag_id = self._config.get("tag_id")
         default_cache = Path(self._config_path).with_name("T_base_cam.npy")
-        self._cache_path = Path(self._config.get("extrinsics_cache_path", default_cache))
+        self._cache_path = resolve_path(self._config.get("extrinsics_cache_path", default_cache))
 
     def _load_config(self) -> dict[str, Any]:
         try:

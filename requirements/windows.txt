@@ -1,0 +1,2 @@
+# Windows-Dev specific additions.
+# Windows mode is intended for local development, replay, and regression checks.

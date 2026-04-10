@@ -1,0 +1,8 @@
+platform_name: wsl_sim
+default_use_fake_robot: true
+default_detector_backend: demo
+allow_gui_sim: true
+allow_robot_hw: false
+allow_usb_hw: false
+preferred_scene_dir: data/scenes/scene_01
+preferred_log_dir: logs/wsl_sim

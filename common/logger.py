@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from .path_manager import get_logs_dir, resolve_path
+
 
 def _json_default(value: Any) -> Any:
     if is_dataclass(value):
@@ -22,8 +24,12 @@ def _json_default(value: Any) -> Any:
 
 
 class ProjectLogger:
-    def __init__(self, log_dir: str) -> None:
-        self._log_dir = Path(log_dir).expanduser()
+    def __init__(self, log_dir: str | Path) -> None:
+        log_path = Path(log_dir)
+        normalized_parts = [part.lower() for part in log_path.parts if part not in {"", "."}]
+        if not log_path.is_absolute() and (not normalized_parts or normalized_parts[0] != "logs"):
+            log_path = get_logs_dir() / log_path
+        self._log_dir = resolve_path(log_path)
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
         logger_name = f"Logos2Physica.{self._log_dir.resolve()}"

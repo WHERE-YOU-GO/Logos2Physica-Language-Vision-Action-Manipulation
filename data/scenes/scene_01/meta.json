@@ -1,0 +1,42 @@
+{
+  "prompt": "put the red cube on the blue block",
+  "expected_source_color": "red",
+  "expected_source_label": "cube",
+  "expected_target_color": "blue",
+  "expected_target_label": "block",
+  "intrinsics": {
+    "fx": 600.0,
+    "fy": 600.0,
+    "cx": 320.0,
+    "cy": 240.0,
+    "width": 640,
+    "height": 480
+  },
+  "T_base_cam": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.35
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      -0.51
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "timestamp": 0.0
+}
