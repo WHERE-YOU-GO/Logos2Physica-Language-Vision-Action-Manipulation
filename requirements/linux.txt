@@ -1,0 +1,2 @@
+# Linux-Lab common additions.
+# Keep this layer hardware-agnostic. Install vision and robot stack separately.

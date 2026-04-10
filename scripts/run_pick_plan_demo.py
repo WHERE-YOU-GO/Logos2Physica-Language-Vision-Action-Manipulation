@@ -1,60 +1,79 @@
 from __future__ import annotations
 
-import numpy as np
+try:
+    from scripts._bootstrap import ensure_repo_root_on_path
+except ImportError:  # pragma: no cover
+    from _bootstrap import ensure_repo_root_on_path
 
-from common.datatypes import BBox2D, SceneObject, SceneState
+ensure_repo_root_on_path()
+
+import argparse
+import json
+from typing import Any
+
 from common.logger import ProjectLogger
+from control_actuation.safety_guardrail import SafetyGuardrail
 from perception.grasp_pose_estimator import TopDownGraspEstimator
-from semantic_interface.command_schema import (
-    ActionType,
-    ObjectQuery,
-    ParsedCommand,
-    ResolvedCommand,
-    SpatialRelation,
-)
+from perception.scene_state import SceneStateBuilder
+from scripts._backend_factory import available_backend_names, build_backend
+from scripts._demo_support import ColorBlockDemoDetector, SyntheticFrameProvider, default_demo_meta
+from semantic_interface.regex_parser import RegexCommandParser
+from semantic_interface.target_resolver import TargetResolver
+from sensing.replay_frame_provider import ReplayFrameProvider
 from skill_planning.cartesian_waypoints import CartesianWaypointBuilder
 from skill_planning.moveit_fallback import MoveItFallbackPlanner
 from skill_planning.pick_place_plan import PickPlacePlanner
 from skill_planning.place_pose_resolver import PlacePoseResolver
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run pick-place planning on one scene.")
+    parser.add_argument("--scene_dir", default=None)
+    parser.add_argument("--prompt", default=None)
+    parser.add_argument("--backend", default="demo", choices=["demo", *available_backend_names()])
+    parser.add_argument("--config", default="config/detector.yaml")
+    return parser.parse_args()
+
+
+def _candidate_labels(scene_meta: dict[str, Any]) -> list[str]:
+    labels = [
+        str(scene_meta.get("expected_source_label", "cube")).strip().lower(),
+        str(scene_meta.get("expected_target_label", "block")).strip().lower(),
+        "cube",
+        "block",
+    ]
+    return [label for index, label in enumerate(labels) if label and label not in labels[:index]]
+
+
+def _build_frame_provider(args: argparse.Namespace, logger: ProjectLogger):
+    if args.scene_dir:
+        return ReplayFrameProvider(args.scene_dir, logger=logger)
+    return SyntheticFrameProvider(meta=default_demo_meta())
+
+
+def _build_detector(args: argparse.Namespace, logger: ProjectLogger, scene_meta: dict[str, Any]):
+    if args.backend == "demo":
+        detector = ColorBlockDemoDetector(scene_meta=scene_meta, logger=logger)
+        detector.warmup()
+        return detector
+    detector = build_backend(args.backend, args.config, logger)
+    detector.warmup()
+    return detector
+
+
 def main() -> None:
+    args = _parse_args()
     logger = ProjectLogger("logs/pick_plan_demo")
-    scene_state = SceneState(
-        frame_timestamp=0.0,
-        table_height_m=0.0,
-        objects=[
-            SceneObject(
-                object_id="obj_1",
-                label="block",
-                bbox=BBox2D(10, 10, 40, 40),
-                center_cam=np.array([0.3, 0.0, 0.55], dtype=np.float64),
-                center_base=np.array([0.35, 0.0, 0.04], dtype=np.float64),
-                confidence=0.95,
-                color="red",
-                shape="cube",
-            ),
-            SceneObject(
-                object_id="obj_2",
-                label="block",
-                bbox=BBox2D(50, 10, 80, 40),
-                center_cam=np.array([0.4, 0.1, 0.55], dtype=np.float64),
-                center_base=np.array([0.45, 0.1, 0.04], dtype=np.float64),
-                confidence=0.90,
-                color="blue",
-                shape="block",
-            ),
-        ],
-    )
-    parsed = ParsedCommand(
-        action=ActionType.PICK_AND_PLACE,
-        source=ObjectQuery(raw_text="red cube", category="cube", color="red", shape="cube"),
-        target=ObjectQuery(raw_text="blue block", category="block", color="blue", shape="block"),
-        relation=SpatialRelation.ON,
-        grasp_mode="topdown",
-        raw_prompt="put the red cube on the blue block",
-    )
-    resolved = ResolvedCommand(parsed=parsed, source_id="obj_1", target_id="obj_2")
+    frame_provider = _build_frame_provider(args, logger)
+    scene_meta = frame_provider.get_meta() if hasattr(frame_provider, "get_meta") else default_demo_meta()
+    prompt = args.prompt or str(scene_meta.get("prompt", "put the red cube on the blue block"))
+    detector = _build_detector(args, logger, scene_meta)
+
+    frame = frame_provider.get_current_frame()
+    detections = detector.detect(frame.rgb, _candidate_labels(scene_meta))
+    scene_state = SceneStateBuilder(logger).build(frame, detections)
+    parsed = RegexCommandParser(logger).parse(prompt)
+    resolved = TargetResolver(logger).resolve(parsed, scene_state)
 
     planner = PickPlacePlanner(
         grasp_estimator=TopDownGraspEstimator("config/robot.yaml", "config/workspace.yaml", logger),
@@ -64,15 +83,21 @@ def main() -> None:
         logger=logger,
     )
     plan = planner.build(resolved, scene_state)
-    print(
-        {
-            "pick_object_id": plan.pick_object_id,
-            "grasp_pose_m": plan.grasp_pose.pose.position.tolist(),
-            "place_pose_m": plan.place_pose.position.tolist(),
-            "pick_waypoints": [wp.extras.get("name") for wp in plan.extras["pick_motion"].waypoints],
-            "place_waypoints": [wp.extras.get("name") for wp in plan.extras["place_motion"].waypoints],
-        }
-    )
+    SafetyGuardrail("config/workspace.yaml", "config/robot.yaml", logger).validate_pick_place_plan(plan)
+
+    pick_motion = plan.extras["pick_motion"]
+    place_motion = plan.extras["place_motion"]
+    payload = {
+        "pick_object_id": plan.pick_object_id,
+        "pregrasp_pose_m": plan.grasp_pose.extras["pregrasp_pose"].position.tolist(),
+        "grasp_pose_m": plan.grasp_pose.pose.position.tolist(),
+        "retreat_pose_m": plan.grasp_pose.extras["retreat_pose"].position.tolist(),
+        "place_pose_m": plan.place_pose.position.tolist(),
+        "motion_plan_waypoints": [waypoint.name or waypoint.extras.get("name", "") for waypoint in pick_motion.waypoints]
+        + [waypoint.name or waypoint.extras.get("name", "") for waypoint in place_motion.waypoints],
+        "safety_guardrail_passed": True,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

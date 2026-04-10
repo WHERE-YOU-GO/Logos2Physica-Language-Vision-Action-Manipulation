@@ -1,0 +1,2 @@
+# WSL-Sim specific additions.
+# Keep this layer lightweight. Prefer storing the project in the WSL Linux filesystem.

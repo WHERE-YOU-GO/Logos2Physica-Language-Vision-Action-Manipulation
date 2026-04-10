@@ -1,25 +1,36 @@
 from __future__ import annotations
 
+try:
+    from scripts._bootstrap import ensure_repo_root_on_path
+except ImportError:  # pragma: no cover
+    from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
+import json
+
 import numpy as np
 
-from common.datatypes import BBox2D, CameraIntrinsics, Detection2D, RGBDFrame
+from common.datatypes import BBox2D, Detection2D
 from perception.depth_project import cam_point_to_base, detection_to_cam_point
+from scripts._demo_support import build_synthetic_frame
 
 
 def main() -> None:
-    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
-    depth = np.ones((480, 640), dtype=np.float32) * 0.6
-    intrinsics = CameraIntrinsics(fx=600.0, fy=600.0, cx=320.0, cy=240.0, width=640, height=480)
-    T_base_cam = np.eye(4, dtype=np.float64)
-    T_base_cam[:3, 3] = np.array([0.2, 0.0, 0.5], dtype=np.float64)
-    frame = RGBDFrame(rgb=rgb, depth=depth, intrinsics=intrinsics, T_base_cam=T_base_cam, timestamp=0.0)
-    det = Detection2D(label="block", score=0.95, bbox=BBox2D(300, 220, 340, 260))
+    frame = build_synthetic_frame()
+    detection = Detection2D(label="cube", score=0.99, bbox=BBox2D(280, 200, 340, 260))
 
-    point_cam = detection_to_cam_point(det, frame)
+    point_cam = detection_to_cam_point(detection, frame)
     point_base = cam_point_to_base(point_cam, frame.T_base_cam)
 
-    print("camera_point_m:", point_cam.tolist())
-    print("base_point_m:", point_base.tolist())
+    payload = {
+        "camera_point_m": point_cam.tolist(),
+        "base_point_m": point_base.tolist(),
+        "has_nan": bool(np.isnan(point_cam).any() or np.isnan(point_base).any()),
+        "has_inf": bool(np.isinf(point_cam).any() or np.isinf(point_base).any()),
+        "units": "meters",
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

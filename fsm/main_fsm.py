@@ -16,6 +16,14 @@ def _log(logger: Any, level: str, message: str) -> None:
         log_fn(message)
 
 
+def _call_optional(component: Any, method_name: str, *args: Any) -> None:
+    if component is None:
+        return
+    method = getattr(component, method_name, None)
+    if callable(method):
+        method(*args)
+
+
 class Prompt2PoseFSM:
     def __init__(
         self,
@@ -55,6 +63,7 @@ class Prompt2PoseFSM:
 
     def _record_state(self, state: FSMState, state_trace: list[str]) -> None:
         state_trace.append(state.value)
+        _log(self._logger, "info", f"FSM state -> {state.value}")
 
     def _parse_prompt(self, prompt: str):
         try:
@@ -120,6 +129,7 @@ class Prompt2PoseFSM:
                 current_stage = FSMState.RESOLVE_TARGETS.value
                 self._record_state(FSMState.RESOLVE_TARGETS, state_trace)
                 resolved_cmd = self._target_resolver.resolve(parsed_cmd, scene_before)
+                _call_optional(self._scene_rechecker, "set_resolved_context", resolved_cmd, scene_before)
                 result["resolved_ids"] = {
                     "source_id": resolved_cmd.source_id,
                     "target_id": resolved_cmd.target_id,
@@ -128,6 +138,7 @@ class Prompt2PoseFSM:
                 current_stage = FSMState.PLAN.value
                 self._record_state(FSMState.PLAN, state_trace)
                 plan = self._pick_place_planner.build(resolved_cmd, scene_before)
+                _call_optional(self._scene_rechecker, "set_plan_context", resolved_cmd, plan, scene_before)
 
                 current_stage = FSMState.SAFETY_CHECK.value
                 self._record_state(FSMState.SAFETY_CHECK, state_trace)

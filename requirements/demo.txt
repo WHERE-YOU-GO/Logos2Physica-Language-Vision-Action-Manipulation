@@ -1,0 +1,2 @@
+# Replay, fake robot, and demo script layer.
+# This layer should stay lightweight and must not require model downloads or robot hardware.

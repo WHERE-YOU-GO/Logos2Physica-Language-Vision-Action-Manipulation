@@ -1,0 +1,9 @@
+# Cross-platform base dependencies for core logic, tests, and configuration.
+# Keep this layer small and stable. Do not add heavy vision or robot packages here.
+
+numpy>=1.26,<3
+PyYAML>=6,<7
+Pillow>=10,<13
+pytest>=8,<10
+mypy>=1.8,<2
+typing-extensions>=4.9,<5

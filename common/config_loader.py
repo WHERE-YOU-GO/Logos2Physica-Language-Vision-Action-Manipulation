@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .exceptions import ProjectError
+from .path_manager import resolve_path
 
 try:
     import yaml
@@ -19,10 +20,10 @@ def _ensure_yaml_available() -> None:
         raise ProjectError("PyYAML is required to load configuration files.") from _YAML_IMPORT_ERROR
 
 
-def _read_mapping(path: str) -> dict[str, Any]:
+def _read_mapping(path: str | Path) -> dict[str, Any]:
     _ensure_yaml_available()
 
-    path_obj = Path(path).expanduser()
+    path_obj = resolve_path(path)
     if not path_obj.exists():
         raise ProjectError(f"Configuration file does not exist: {path_obj}")
     if not path_obj.is_file():
@@ -45,31 +46,31 @@ def _read_mapping(path: str) -> dict[str, Any]:
     return dict(payload)
 
 
-def load_yaml(path: str) -> dict[str, Any]:
+def load_yaml(path: str | Path) -> dict[str, Any]:
     """Load a YAML file and return its top-level mapping."""
 
     return _read_mapping(path)
 
 
-def load_camera_config(path: str) -> dict[str, Any]:
+def load_camera_config(path: str | Path) -> dict[str, Any]:
     """Load camera configuration."""
 
     return _read_mapping(path)
 
 
-def load_robot_config(path: str) -> dict[str, Any]:
+def load_robot_config(path: str | Path) -> dict[str, Any]:
     """Load robot configuration."""
 
     return _read_mapping(path)
 
 
-def load_workspace_config(path: str) -> dict[str, Any]:
+def load_workspace_config(path: str | Path) -> dict[str, Any]:
     """Load workspace configuration."""
 
     return _read_mapping(path)
 
 
-def load_detector_config(path: str) -> dict[str, Any]:
+def load_detector_config(path: str | Path) -> dict[str, Any]:
     """Load detector configuration."""
 
     return _read_mapping(path)

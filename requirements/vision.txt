@@ -1,0 +1,12 @@
+# Optional vision backend layer.
+# These packages are sensitive to CUDA, driver, wheel, Python, and NumPy compatibility.
+# Install this layer only after the base/demo workflow is stable.
+
+torch
+torchvision
+transformers
+ultralytics
+opencv-python
+timm
+sentencepiece
+accelerate
