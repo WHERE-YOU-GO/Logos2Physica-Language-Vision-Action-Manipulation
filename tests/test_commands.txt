@@ -1,0 +1,812 @@
+cd ~/Logos2Physica
+conda activate logos311
+conda activate logos313
+
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests -vv
+python -m scripts.verify_python_env
+python -m scripts.check_platform
+python -m scripts.validate_scene_dir --scene_dir data/scenes/scene_01
+python -m scripts.run_scene_state_demo --scene_dir data/scenes/scene_01 --backend demo
+python -m scripts.run_pick_plan_demo --scene_dir data/scenes/scene_01 --backend demo
+python -m scripts.run_fsm_once --use_fake_robot --scene_dir data/scenes/scene_01 --backend demo
+
+ping -c 4 "192.168.1.158"
+grep -n "192.168.1.158" config/robot.yaml
+grep -n "speed" config/robot.yaml
+grep -n "workspace" -n config/workspace.yaml
+
+nano config/robot.yaml
+nano config/workspace.yaml
+
+python - <<'PY'
+# TEST A: Read-only robot connection and state inspection
+from xarm.wrapper import XArmAPI
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+print("connected:", True)
+print("state:", arm.get_state())
+print("error_warn_code:", arm.get_err_warn_code())
+print("position:", arm.get_position())
+print("angles:", arm.get_servo_angle())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST B: Controller clean-up and motion preparation
+from xarm.wrapper import XArmAPI
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+print("state:", arm.get_state())
+print("error_warn_code:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST C: Gripper open-close-open verification
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+print("open gripper")
+arm.open_lite6_gripper()
+time.sleep(2)
+
+print("close gripper")
+arm.close_lite6_gripper()
+time.sleep(2)
+
+print("open gripper again")
+arm.open_lite6_gripper()
+time.sleep(2)
+
+try:
+    print("gripper position:", arm.get_gripper_position())
+except Exception as e:
+    print("gripper position read failed:", e)
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST D: Minimal upward Cartesian motion test
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("current position:", pos)
+
+target = pos.copy()
+target[2] += 20.0  # move up by 20 mm only
+
+print("target position:", target)
+ret = arm.set_position(*target, speed=30, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST D1: Ultra-small upward Cartesian motion
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("current position:", pos)
+
+target = pos.copy()
+target[2] += 5.0   # only 5 mm upward
+
+print("target position:", target)
+ret = arm.set_position(*target, speed=10, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST D2: Minimal joint-space motion
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, angles = arm.get_servo_angle()
+print("current angles:", angles)
+
+target = angles.copy()
+target[0] += 1.0   # only 1 degree on joint 1
+
+print("target angles:", target)
+ret = arm.set_servo_angle(angle=target, speed=5, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST E: Minimal up-and-back Cartesian motion test
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("start position:", pos)
+
+up = pos.copy()
+up[2] += 20.0
+
+print("move up")
+arm.set_position(*up, speed=30, wait=True)
+time.sleep(1)
+
+print("move back")
+arm.set_position(*pos, speed=30, wait=True)
+time.sleep(1)
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST F: Full bring-up diagnostic test
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+print("connected:", True)
+
+try:
+    print("initial state:", arm.get_state())
+except Exception as e:
+    print("initial state read failed:", e)
+
+try:
+    print("initial err/warn:", arm.get_err_warn_code())
+except Exception as e:
+    print("initial err/warn read failed:", e)
+
+print("clean_warn()")
+try:
+    print("ret:", arm.clean_warn())
+except Exception as e:
+    print("clean_warn failed:", e)
+
+print("clean_error()")
+try:
+    print("ret:", arm.clean_error())
+except Exception as e:
+    print("clean_error failed:", e)
+
+time.sleep(1)
+
+print("motion_enable(True)")
+try:
+    print("ret:", arm.motion_enable(enable=True))
+except Exception as e:
+    print("motion_enable failed:", e)
+
+print("set_mode(0)")
+try:
+    print("ret:", arm.set_mode(0))
+except Exception as e:
+    print("set_mode failed:", e)
+
+print("set_state(0)")
+try:
+    print("ret:", arm.set_state(0))
+except Exception as e:
+    print("set_state failed:", e)
+
+time.sleep(1)
+
+try:
+    print("final state:", arm.get_state())
+except Exception as e:
+    print("final state read failed:", e)
+
+try:
+    print("final err/warn:", arm.get_err_warn_code())
+except Exception as e:
+    print("final err/warn read failed:", e)
+
+try:
+    print("position:", arm.get_position())
+except Exception as e:
+    print("position read failed:", e)
+
+try:
+    print("angles:", arm.get_servo_angle())
+except Exception as e:
+    print("angles read failed:", e)
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST G: Cartesian micro-motion from safe home
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("home position:", pos)
+
+# try x + 5 mm first
+target = pos.copy()
+target[0] += 5.0
+
+print("target position:", target)
+ret = arm.set_position(*target, speed=10, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST G1: Cartesian micro-motion x forward and back from safe home
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("home position:", pos)
+
+target = pos.copy()
+target[0] += 5.0
+
+print("move to target:", target)
+ret1 = arm.set_position(*target, speed=10, wait=True)
+print("forward return:", ret1)
+
+time.sleep(1)
+
+print("move back to home:", pos)
+ret2 = arm.set_position(*pos, speed=10, wait=True)
+print("back return:", ret2)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST G2: Cartesian micro-motion y + 5 mm from safe home
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("home position:", pos)
+
+target = pos.copy()
+target[1] += 5.0
+
+print("target position:", target)
+ret = arm.set_position(*target, speed=10, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST G3: Cartesian micro-motion z + 2 mm from safe home
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+code, pos = arm.get_position()
+print("home position:", pos)
+
+target = pos.copy()
+target[2] += 2.0
+
+print("target position:", target)
+ret = arm.set_position(*target, speed=5, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST H: Return to the new safe home pose
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+HOME_POSE = [81.54493, 2.013085, 86.952263, 179.996124, 0.177273, 1.026568]
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+print("current position:", arm.get_position())
+print("target home pose:", HOME_POSE)
+
+ret = arm.set_position(*HOME_POSE, speed=10, wait=True)
+print("move return:", ret)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+print("final position:", arm.get_position())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST I: Air pick sequence from the new safe home pose
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+HOME_POSE = [81.54493, 2.013085, 86.952263, 179.996124, 0.177273, 1.026568]
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+print("move to HOME")
+ret0 = arm.set_position(*HOME_POSE, speed=10, wait=True)
+print("ret0:", ret0)
+
+code, home = arm.get_position()
+home = home
+print("home position:", home)
+
+pregrasp = home.copy()
+grasp = home.copy()
+grasp[2] -= 5.0
+retreat = home.copy()
+
+print("pregrasp:", pregrasp)
+print("grasp:", grasp)
+print("retreat:", retreat)
+
+print("open gripper")
+arm.open_lite6_gripper()
+time.sleep(1)
+
+print("move to pregrasp")
+ret1 = arm.set_position(*pregrasp, speed=10, wait=True)
+print("ret1:", ret1)
+
+print("move to grasp")
+ret2 = arm.set_position(*grasp, speed=5, wait=True)
+print("ret2:", ret2)
+
+print("close gripper")
+arm.close_lite6_gripper()
+time.sleep(1)
+
+print("move to retreat")
+ret3 = arm.set_position(*retreat, speed=10, wait=True)
+print("ret3:", ret3)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+print("final position:", arm.get_position())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+# TEST I2: Air pick with segmented retreat after closing gripper
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+HOME_POSE = [81.54493, 2.013085, 86.952263, 179.996124, 0.177273, 1.026568]
+
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+arm.clean_warn()
+arm.clean_error()
+arm.motion_enable(enable=True)
+arm.set_mode(0)
+arm.set_state(0)
+
+print("move to HOME")
+ret0 = arm.set_position(*HOME_POSE, speed=10, wait=True)
+print("ret0:", ret0)
+
+code, home = arm.get_position()
+home = home
+print("home position:", home)
+
+pregrasp = home.copy()
+grasp = home.copy()
+grasp[2] -= 5.0
+
+retreat_1 = grasp.copy()
+retreat_1[2] += 2.0
+
+retreat_2 = retreat_1.copy()
+retreat_2[2] += 2.0
+
+retreat_3 = retreat_2.copy()
+retreat_3[2] += 1.0
+
+print("pregrasp:", pregrasp)
+print("grasp:", grasp)
+print("retreat_1:", retreat_1)
+print("retreat_2:", retreat_2)
+print("retreat_3:", retreat_3)
+
+print("open gripper")
+arm.open_lite6_gripper()
+time.sleep(1)
+
+print("move to pregrasp")
+ret1 = arm.set_position(*pregrasp, speed=10, wait=True)
+print("ret1:", ret1)
+
+print("move to grasp")
+ret2 = arm.set_position(*grasp, speed=5, wait=True)
+print("ret2:", ret2)
+
+print("close gripper")
+arm.close_lite6_gripper()
+time.sleep(1)
+
+print("move to retreat_1")
+ret3 = arm.set_position(*retreat_1, speed=5, wait=True)
+print("ret3:", ret3)
+
+print("move to retreat_2")
+ret4 = arm.set_position(*retreat_2, speed=5, wait=True)
+print("ret4:", ret4)
+
+print("move to retreat_3")
+ret5 = arm.set_position(*retreat_3, speed=5, wait=True)
+print("ret5:", ret5)
+
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+print("final position:", arm.get_position())
+
+arm.disconnect()
+print("disconnected:", True)
+PY
+
+python - <<'PY'
+import cv2
+import numpy
+from xarm.wrapper import XArmAPI
+print("basic deps ok")
+PY
+
+python - <<'PY'
+try:
+    import pyzed.sl as sl
+    print("pyzed ok")
+except Exception as e:
+    print("pyzed failed:", e)
+PY
+
+python3 - <<'PY'
+try:
+    import pyzed.sl as sl
+    print("system python: pyzed ok")
+except Exception as e:
+    print("system python: pyzed failed:", e)
+PY
+
+
+python - <<'PY'
+try:
+    import pyzed.sl as sl
+    print("pyzed already works in logos311")
+except Exception as e:
+    print("pyzed not available in logos311:", e)
+PY
+
+PY_SITE=$(python - <<'PY'
+import site
+print(site.getsitepackages()[0])
+PY
+)
+
+echo "Current env site-packages: $PY_SITE"
+
+
+echo "/home/rob/miniforge3/lib/python3.13/site-packages" > "$PY_SITE/zed_system_path.pth"
+
+ls -l "$PY_SITE/zed_system_path.pth"
+cat "$PY_SITE/zed_system_path.pth"
+
+python - <<'PY'
+try:
+    import pyzed.sl as sl
+    print("pyzed ok in logos311")
+except Exception as e:
+    print("pyzed failed in logos311:", e)
+PY
+
+python - <<'PY'
+import pyzed.sl as sl
+print("pyzed import ok in logos311")
+PY
+
+python - <<'PY'
+import sys
+sys.path.append('/mnt/e/UMN/CSCI5551/Projects/RC/robotics5551')
+
+from utils.zed_camera import ZedCamera
+
+zed = ZedCamera()
+print("camera intrinsic:")
+print(zed.camera_intrinsic)
+print("image shape:", None if zed.image is None else zed.image.shape)
+print("point cloud shape:", None if zed.point_cloud is None else zed.point_cloud.shape)
+zed.close()
+PY
+
+python - <<'PY'
+import pyzed.sl as sl
+print("sl module file:", getattr(sl, "__file__", "no __file__"))
+PY
+
+rm /home/rob/miniforge3/envs/logos311/lib/python3.11/site-packages/zed_system_path.pth
+ls /home/rob/miniforge3/envs/logos311/lib/python3.11/site-packages | grep zed_system_path
+
+python - <<'PY'
+import sys
+sys.path.append('/mnt/e/UMN/CSCI5551/Projects/RC/robotics5551')
+
+from utils.zed_camera import ZedCamera
+
+zed = ZedCamera()
+print("camera intrinsic:")
+print(zed.camera_intrinsic)
+
+img = zed.image
+pc = zed.point_cloud
+
+print("image is None:", img is None)
+print("point cloud is None:", pc is None)
+if img is not None:
+    print("image shape:", img.shape)
+if pc is not None:
+    print("point cloud shape:", pc.shape)
+
+zed.close()
+PY
+
+python - <<'PY'
+try:
+    import pyzed.sl as sl
+    print("pyzed ok in logos313zed")
+    print("sl module file:", getattr(sl, "__file__", "no __file__"))
+except Exception as e:
+    print("pyzed failed in logos313zed:", e)
+PY
+
+
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate logos313
+cd ~/Logos2Physica
+
+python -m pytest tests -vv
+python -m scripts.verify_python_env
+python -m scripts.check_platform
+
+python - <<'PY'
+from xarm.wrapper import XArmAPI
+ROBOT_IP = "192.168.1.158"
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+print("state:", arm.get_state())
+print("error_warn_code:", arm.get_err_warn_code())
+print("position:", arm.get_position())
+print("angles:", arm.get_servo_angle())
+arm.disconnect()
+PY
+
+python - <<'PY'
+from xarm.wrapper import XArmAPI
+import time
+
+ROBOT_IP = "192.168.1.158"
+arm = XArmAPI(ROBOT_IP, is_radian=False)
+arm.connect()
+
+print("initial state:", arm.get_state())
+print("initial err/warn:", arm.get_err_warn_code())
+
+print("clean_warn:", arm.clean_warn())
+print("clean_error:", arm.clean_error())
+time.sleep(1)
+
+print("motion_enable:", arm.motion_enable(enable=True))
+print("set_mode:", arm.set_mode(0))
+print("set_state:", arm.set_state(0))
+time.sleep(1)
+
+print("final state:", arm.get_state())
+print("final err/warn:", arm.get_err_warn_code())
+print("position:", arm.get_position())
+print("angles:", arm.get_servo_angle())
+
+arm.disconnect()
+PY
+
+python scripts/run_mini_task.py \
+  --tag_id 7 \
+  --target_tag_size_m 0.025 \
+  --no_gui
+
+python scripts/run_checkpoint8_style_mini_task.py --recover_robot
+
+python -m py_compile scripts/run_mini_task.py
+python -m unittest tests.test_run_mini_task_parser -v
+python scripts/run_mini_task.py --home_only
