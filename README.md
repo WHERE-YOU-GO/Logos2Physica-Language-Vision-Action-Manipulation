@@ -1,129 +1,256 @@
 # Logos2Physica — Language–Vision–Action Manipulation
 
-A modular **language-conditioned tabletop manipulation** stack for a Lite6-class arm: one **natural-language command** drives **scene grounding**, **RGB-D geometry**, **grasp / place planning**, **Cartesian execution**, **gripper control**, and **post-action verification**. The system is organized as a transparent, debuggable pipeline rather than an end-to-end black box:
+Logos2Physica is a modular language-conditioned tabletop manipulation stack for CSCI 5551. It connects short structured commands to RGB-D perception, AprilTag/world-frame calibration, geometric planning, Lite6/xArm execution, and run-time verification.
 
-**sense → parse → ground → project → plan → grasp → verify → place**
+The final implemented path centers on `scripts/run_mini_task.py` with the validated `checkpoint8_style` backend. The stable hardware baseline is duplicate-aware AprilTag-assisted multi-cube placement; an opt-in preset-layout mode places cubes into predefined robot-base-frame slots without target AprilTags.
 
-The repository is designed for **three practical operating regimes**:
+**Pipeline:** sense → parse → ground → project → plan → grasp → verify → place
 
-1. **Replay / fake-robot validation** (fully safe, no hardware required)
-2. **Real perception + dry planning** (real camera / detector, no robot motion)
-3. **Staged real-robot bring-up** (true Lite6 execution, introduced incrementally)
+## 1. Project Overview
 
----
+The project goal is to translate tabletop manipulation commands into stable, measurable robot actions. The system is intentionally transparent rather than an end-to-end black box: language parsing, color/semantic grounding, RGB-D projection, AprilTag calibration, pose planning, grasp/place execution, and verification are separate layers that can be inspected and tested.
 
-## 1. What this repository does
+The proposal/poster frame the work as a two-tier system:
 
-| Layer | Role |
-|------|------|
-| **Language** | Converts a short English instruction into a structured `ParsedCommand` (`source`, optional `target`, relation, action type). |
-| **Perception** | Uses an open-vocabulary detector backend and RGB-D projection to build 3D `SceneObject`s in the robot base frame. |
-| **Planning** | Produces grasp pose, place pose, and Cartesian waypoint segments for pick-and-place. |
-| **Control & Safety** | Applies workspace guardrails, then executes motion and gripper commands through a robot adapter. |
-| **Verification** | Checks post-grasp and post-place outcomes, enabling bounded retries if desired. |
+- **Tier 1 semantic path:** language parsing plus open-vocabulary or VLM-style grounding where available in the repository.
+- **Tier 2 geometric fallback:** keyword/color extraction, deterministic HSV segmentation, depth projection, AprilTag or robot-base-frame targets, and checkpoint-style robot execution.
 
-The primary user-facing task is simple:
+The final validated real-robot implementation emphasizes the robust Tier 2 / `checkpoint8_style` branch.
 
-> **Give the robot a short English command so it grasps the correct object, and optionally places it relative to another object or region.**
+## 2. Implemented Operating Modes
 
----
+- **Replay / fake-robot validation:** the broader repository contains replay scenes, demo detectors, and fake Lite6 adapters for safe software validation.
+- **`checkpoint8_style` real robot execution:** `scripts/run_mini_task.py --execution_backend checkpoint8_style` is the main hardware entry point.
+- **AprilTag-assisted duplicate-aware multi-cube placement:** detects multiple same-color cubes and duplicate same-ID target tags, then assigns concrete cube/tag pairs.
+- **Preset-layout placement without target AprilTags:** detects source cubes from RGB-D, then places them into JSON-defined robot-base-frame slots.
+- **Older standalone runner:** `scripts/run_checkpoint8_style_mini_task.py` still exists as an experimental checkpoint8-style runner, but `scripts/run_mini_task.py` is the primary documented entry point.
 
-## 2. Current validated operating modes
+## 3. Hardware and Dependencies
 
-At the current stage of the project, the following modes are the most important:
+Target lab setup:
 
-### Mode A — Replay scene + demo detector + fake robot
-This is the safest and most reproducible mode. It uses:
+- Lite6 / xArm robotic arm with the xArm Python SDK.
+- ZED 2i or compatible ZED RGB-D camera with `pyzed`.
+- OpenCV, NumPy, AprilTag detection, and RGB-D point-cloud processing.
+- Colored tabletop cubes, AprilTag calibration landmarks, and a calibrated camera-to-robot transform.
+- Lab checkpoint modules used by the real robot path, including `checkpoint0`, `checkpoint1`, `checkpoint6`, `utils.zed_camera`, and `utils.vis_utils`.
 
-- a saved RGB-D replay scene from `data/scenes/scene_01`
-- the lightweight `demo` backend (`ColorBlockDemoDetector`)
-- the `FakeLite6Adapter` instead of the real robot
+Recommended Linux lab setup:
 
-This mode is the **recommended default** for:
-- software validation
-- demos without hardware risk
-- debugging parsing / scene-state / planning / FSM transitions
+```bash
+bash scripts/setup_linux_lab.sh
+source .venv_lab/bin/activate
+bash scripts/install_optional_vision.sh
+bash scripts/install_robot_stack.sh
+```
 
-### Mode B — Replay scene + demo detector + planning only
-This mode validates scene understanding and motion planning without executing the full FSM.
+Robot IP and other local hardware values should be configured locally, for example through `config/robot.yaml` or command-line overrides. Do not commit lab-specific private configuration.
 
-### Mode C — Real robot staged bring-up
-This is the hardware path. It should be introduced in stages:
-1. connect to the robot
-2. read current robot state
-3. test minimal motion
-4. test gripper open / close
-5. test empty-space pregrasp / grasp / retreat
-6. only then move to real object manipulation
+## 4. Safety and Robot Readiness
 
-### Mode D — Real detector / real camera / full closed loop
-This is the final experimental mode, but it is **not the first recommended hardware step**. It depends on:
-- real calibrated RGB-D input
-- real detector weights and model paths
-- correct `T_base_cam`
-- validated workspace limits
-- successful staged robot bring-up
+Before any real robot motion, clear errors if needed and verify that the robot can home:
 
----
+```bash
+python scripts/run_mini_task.py --recover_robot
+python scripts/run_mini_task.py --home_only
+```
 
-## 3. End-to-end pipeline (FSM)
-
-The orchestrator is `fsm/main_fsm.py`, implemented as `Prompt2PoseFSM`. A full execution run proceeds through these conceptual stages:
-
-1. **Parse command**  
-   Convert the user’s natural-language instruction into a `ParsedCommand`. The current primary path is regex-based parsing. Optional LLM-based parsing can be added when needed.
-
-2. **Sense scene**  
-   Acquire a frame (real camera or replay provider), detect relevant objects, and construct a `SceneState`.
-
-3. **Resolve targets**  
-   Match the linguistic description (e.g., *red cube*, *blue block*) to concrete scene object IDs.
-
-4. **Plan**  
-   Build a pick-and-place plan including:
-   - `pregrasp_pose`
-   - `grasp_pose`
-   - `retreat_pose`
-   - `place_pose`
-   - waypoint sequence
-
-5. **Safety check**  
-   Validate workspace bounds, waypoint heights, and overall motion legality.
-
-6. **Execute pick**  
-   Run approach, grasp, gripper close, and retreat.
-
-7. **Verify grasp**  
-   Check whether grasping appears successful.
-
-8. **Execute place**  
-   If grasp is valid, approach the place location, release, and retreat.
-
-9. **Verify place**  
-   Check whether the object was placed as intended.
-
-This decomposition is deliberate: the project separates **semantic understanding**, **physical grounding**, **planning**, **control**, and **verification** so that each layer can be tested independently.
-
----
-
-## 4. Natural-language command format
-
-The repository currently supports **short, structured English commands**, rather than unrestricted conversation.
-
-Supported verbs include:
-
-- `pick up`
-- `pick`
-- `grab`
-- `put`
-- `place`
-- `move`
-
-### 4.1 Pick-only commands
-
-Use one of:
+Expected ready status:
 
 ```text
-pick up <object description>
-pick <object description>
-grab <object description>
+state=(0,2)
+err/warn=[0,0]
+```
+
+Safety rules:
+
+- Run `--home_only` before real robot execution.
+- Prefer `--dry_run` before every new real run.
+- Do not run real motion after C22, C31, or `state=4` until `--recover_robot` and `--home_only` pass.
+- Do not use `--auto_confirm` until the same command has succeeded with normal operator confirmation.
+- The `checkpoint8_style` pose-plan child enforces start-home and final-home behavior.
+
+## 5. AprilTag-Assisted Duplicate-Aware Multi-Cube Placement
+
+This is the stable six-cube baseline:
+
+- 2 red cubes -> 2 target detections of tag 6
+- 2 green cubes -> 2 target detections of tag 8
+- 2 blue cubes -> 2 target detections of tag 7
+
+Dry run:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --duplicate_aware_multi_place \
+  --duplicate_cube_tag_map "red cube:6:2,green cube:8:2,blue cube:7:2" \
+  --target_tag_size_m 0.020 \
+  --dry_run \
+  --no_gui
+```
+
+Real run with operator confirmation:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --duplicate_aware_multi_place \
+  --duplicate_cube_tag_map "red cube:6:2,green cube:8:2,blue cube:7:2" \
+  --target_tag_size_m 0.020 \
+  --no_gui
+```
+
+Implementation notes:
+
+- `--duplicate_cube_tag_map` encodes cube prompt, target tag ID, and required count.
+- Repeated target IDs are allowed when a count is provided.
+- Raw HSV/point-cloud components are clustered into physical cube instances before assignment.
+- Assignment uses global nearest matching in XY.
+- For each assigned pair, the parent writes a raw pose-plan JSON.
+- A refinement child opens the ZED, refines source/target poses, writes a refined pose-plan JSON, and performs no robot motion.
+- A robot-only child loads the refined JSON, uses `--no_pose_plan_refine`, does not open ZED, and executes home -> `checkpoint1.grasp_cube` -> safety check -> `checkpoint1.place_cube` -> final home.
+- This subprocess split keeps native ZED/OpenCV/pyzed cleanup failures isolated from robot motion.
+
+`--target_tag_size_m 0.020` is the empirically used effective detected size for placement target tags in the validated setup. Calibration tags used by `checkpoint0` are handled separately; this value should not be interpreted as the physical size of every AprilTag in the lab.
+
+## 6. Preset-Layout Placement Without Target AprilTags
+
+Preset-layout mode is an opt-in extension for target-free layout generation. Source cubes are still detected using ZED/HSV/depth, but target locations come from a JSON layout in the robot base frame. The example layout is `config/layouts/hexagon_6_slots.json`.
+
+Target AprilTags are not used for placement in this mode, but calibration tags and the camera-to-base transform are still required. Preset slot coordinates must be adjusted for the actual table and robot workspace.
+
+Dry run:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --preset_layout_place \
+  --preset_place_layout_json config/layouts/hexagon_6_slots.json \
+  --preset_cube_counts "red cube:2,green cube:2,blue cube:2" \
+  --preset_cube_slot_map "red cube:1,2;green cube:3,4;blue cube:5,6" \
+  --dry_run \
+  --no_gui
+```
+
+Real run with operator confirmation:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --preset_layout_place \
+  --preset_place_layout_json config/layouts/hexagon_6_slots.json \
+  --preset_cube_counts "red cube:2,green cube:2,blue cube:2" \
+  --preset_cube_slot_map "red cube:1,2;green cube:3,4;blue cube:5,6" \
+  --no_gui
+```
+
+Auto-confirmed run, only after a normal confirmed run succeeds:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --preset_layout_place \
+  --preset_place_layout_json config/layouts/hexagon_6_slots.json \
+  --preset_cube_counts "red cube:2,green cube:2,blue cube:2" \
+  --preset_cube_slot_map "red cube:1,2;green cube:3,4;blue cube:5,6" \
+  --auto_confirm \
+  --no_gui
+```
+
+Useful preset options include `--preset_assignment_metric nearest`, `--preset_use_slot_yaw`, and `--allow_preset_slots_outside_workspace`.
+
+## 7. Single-Color Diagnostic Runs
+
+Use these to validate one color group at a time. Add `--dry_run` first when testing a new physical arrangement.
+
+AprilTag-assisted red-only:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --duplicate_aware_multi_place \
+  --duplicate_cube_tag_map "red cube:6:2" \
+  --target_tag_size_m 0.020 \
+  --no_gui
+```
+
+AprilTag-assisted green-only:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --duplicate_aware_multi_place \
+  --duplicate_cube_tag_map "green cube:8:2" \
+  --target_tag_size_m 0.020 \
+  --no_gui
+```
+
+AprilTag-assisted blue-only:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --duplicate_aware_multi_place \
+  --duplicate_cube_tag_map "blue cube:7:2" \
+  --target_tag_size_m 0.020 \
+  --no_gui
+```
+
+Preset red-only:
+
+```bash
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --preset_layout_place \
+  --preset_place_layout_json config/layouts/hexagon_6_slots.json \
+  --preset_cube_counts "red cube:2" \
+  --preset_cube_slot_map "red cube:1,2" \
+  --no_gui
+```
+
+## 8. Logs and Outputs
+
+Runtime reports, previews, and pose plans are saved under `logs/`, including:
+
+- `logs/duplicate_assignment_report.json`
+- `logs/run_mini_task_duplicate_assignment_preview.png`
+- `logs/duplicate_pose_plans/`
+- `logs/preset_layout_assignment_report.json`
+- `logs/run_mini_task_preset_layout_preview.png`
+- `logs/preset_pose_plans/`
+
+These outputs support experiment review, success/failure summaries, task timing notes, placement-error measurement, and repeatability checks. `logs/` is ignored by `.gitignore`; do not commit raw lab logs or generated previews unless intentionally curated.
+
+## 9. Development Tests
+
+Run the focused syntax and parser/assignment tests:
+
+```bash
+python -m py_compile scripts/run_mini_task.py
+python -m unittest tests/test_run_mini_task_parser.py -v
+```
+
+Broader software sanity checks are available through:
+
+```bash
+bash scripts/run_sanity_checks.sh
+```
+
+## 10. Known Limitations
+
+- Real robot execution requires the lab hardware setup, vendor SDKs, and valid local robot configuration.
+- The ZED camera stream must be available and not occupied by another process.
+- The prompt parser is structured; it is not open-ended dialogue.
+- The robust validated hardware path is the geometric / `checkpoint8_style` branch. Semantic Tier 1 components should be treated as modular project framing or partial support unless verified for the current setup.
+- Duplicate-aware and preset modes currently require supported color prompts containing exactly one of `red`, `green`, or `blue`.
+- Duplicate-aware assignment depends on clean segmentation, visible cubes/tags, and reasonable workspace bounds.
+- Preset layout coordinates are lab-specific and must be calibrated for the physical table.
+- Target-free preset layout still requires camera-to-base calibration.
+- Dry runs and normal operator-confirmed runs should precede any `--auto_confirm` execution.
+
+## 11. Relation to Proposal and Poster
+
+The proposal/poster frame Logos2Physica as Lite6 language-conditioned tabletop manipulation with an AprilTag-centered reference frame and a Tier 1 semantic path plus Tier 2 geometric fallback. The final implementation emphasizes the robust Tier 2 / `checkpoint8_style` real-robot branch and scales it to duplicate-aware multi-cube placement.
+
+AprilTag-assisted placement is the repeatable baseline for measurable placement. Preset-layout mode demonstrates target-free layout generation by placing detected cubes into predefined robot-base-frame slots.
