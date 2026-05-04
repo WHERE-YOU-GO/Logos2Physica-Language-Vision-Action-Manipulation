@@ -810,3 +810,12 @@ python scripts/run_checkpoint8_style_mini_task.py --recover_robot
 python -m py_compile scripts/run_mini_task.py
 python -m unittest tests.test_run_mini_task_parser -v
 python scripts/run_mini_task.py --home_only
+
+python scripts/run_mini_task.py \
+  --execution_backend checkpoint8_style \
+  --preset_layout_place \
+  --preset_place_layout_json config/layouts/hexagon_6_slots.json \
+  --preset_cube_counts "red cube:2,green cube:2,blue cube:2" \
+  --preset_cube_slot_map "red cube:1,2;green cube:3,4;blue cube:5,6" \
+  --no_gui
+  

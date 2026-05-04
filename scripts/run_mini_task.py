@@ -8,6 +8,8 @@ except ImportError:  # pragma: no cover
 REPO_ROOT = ensure_repo_root_on_path()
 
 import argparse
+import itertools
+import json
 import math
 import os
 import shlex
@@ -34,6 +36,13 @@ GRIPPER_LENGTH_MM = 0.067 * 1000.0
 CALIBRATION_TAG_FAMILY = "tag36h11"
 CALIBRATION_TAG_SIZE_M = 0.08
 TARGET_TAG_SIZE_M = 0.020
+DUPLICATE_ASSIGNMENT_REPORT_PATH = "logs/duplicate_assignment_report.json"
+DUPLICATE_ASSIGNMENT_PREVIEW_PATH = "logs/run_mini_task_duplicate_assignment_preview.png"
+DUPLICATE_POSE_PLAN_DIR = "logs/duplicate_pose_plans"
+PRESET_LAYOUT_ASSIGNMENT_REPORT_PATH = "logs/preset_layout_assignment_report.json"
+PRESET_LAYOUT_PREVIEW_PATH = "logs/run_mini_task_preset_layout_preview.png"
+PRESET_POSE_PLAN_DIR = "logs/preset_pose_plans"
+MAX_DUPLICATE_GROUP_COUNT = 10
 
 
 def _argv_option_value(flag_name: str) -> str | None:
@@ -209,6 +218,47 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--place_to_tag", action="store_true", help="Place the cube on a target AprilTag in checkpoint8_style mode.")
     parser.add_argument("--multi_place_to_tags", action="store_true", help="Place multiple prompted cubes onto mapped AprilTags in checkpoint8_style mode.")
     parser.add_argument(
+        "--duplicate_aware_multi_place",
+        action="store_true",
+        help="Detect duplicate cube/tag instances, assign them by distance, and execute pose-plan pairs.",
+    )
+    parser.add_argument(
+        "--preset_layout_place",
+        action="store_true",
+        help="Detect duplicate cube instances and place them into preset robot-base-frame layout slots.",
+    )
+    parser.add_argument(
+        "--preset_place_layout_json",
+        default=None,
+        help="Preset placement layout JSON file for --preset_layout_place.",
+    )
+    parser.add_argument(
+        "--preset_cube_counts",
+        default=None,
+        help='Preset cube counts, for example "red cube:2,green cube:2,blue cube:2".',
+    )
+    parser.add_argument(
+        "--preset_cube_slot_map",
+        default=None,
+        help='Preset slot map, for example "red cube:1,2;green cube:3,4;blue cube:5,6".',
+    )
+    parser.add_argument(
+        "--preset_assignment_metric",
+        choices=["nearest"],
+        default="nearest",
+        help="Preset layout assignment metric.",
+    )
+    parser.add_argument(
+        "--preset_use_slot_yaw",
+        action="store_true",
+        help="Use slot yaw_deg for preset place pose instead of preserving source cube yaw.",
+    )
+    parser.add_argument(
+        "--allow_preset_slots_outside_workspace",
+        action="store_true",
+        help="Allow preset layout slots outside the conservative contact workspace bounds.",
+    )
+    parser.add_argument(
         "--multi_subprocess",
         action="store_true",
         help="Run each --multi_place_to_tags pair in an isolated single-pair checkpoint8_style subprocess.",
@@ -228,6 +278,88 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help='Comma-separated multi-place mapping, for example "red cube:7,green cube:8,blue cube:9".',
     )
+    parser.add_argument(
+        "--duplicate_cube_tag_map",
+        default=None,
+        help='Duplicate-aware map, for example "red cube:6:2,green cube:8:2,blue cube:7:2".',
+    )
+    parser.add_argument(
+        "--assignment_metric",
+        choices=["nearest"],
+        default="nearest",
+        help="Duplicate-aware assignment metric.",
+    )
+    parser.add_argument(
+        "--assignment_space",
+        choices=["xy"],
+        default="xy",
+        help="Duplicate-aware assignment coordinate space.",
+    )
+    parser.add_argument(
+        "--max_assignment_distance_m",
+        type=float,
+        default=0.30,
+        help="Maximum allowed duplicate-aware cube/tag XY assignment distance in meters.",
+    )
+    parser.add_argument("--candidate_x_min_m", type=float, default=0.05)
+    parser.add_argument("--candidate_x_max_m", type=float, default=0.80)
+    parser.add_argument("--candidate_y_min_m", type=float, default=-0.45)
+    parser.add_argument("--candidate_y_max_m", type=float, default=0.45)
+    parser.add_argument("--candidate_z_min_m", type=float, default=0.00)
+    parser.add_argument("--candidate_z_max_m", type=float, default=0.08)
+    parser.add_argument("--candidate_min_area_px", type=int, default=500)
+    parser.add_argument("--candidate_merge_distance_m", type=float, default=0.035)
+    parser.add_argument("--candidate_min_extent_m", type=float, default=0.012)
+    parser.add_argument("--candidate_max_extent_m", type=float, default=0.040)
+    parser.add_argument("--candidate_merge_prompts", default="green cube")
+    parser.add_argument("--green_candidate_min_area_px", type=int, default=1200)
+    parser.add_argument("--red_candidate_min_area_px", type=int, default=500)
+    parser.add_argument("--blue_candidate_min_area_px", type=int, default=500)
+    parser.add_argument(
+        "--debug_duplicate_candidates_only",
+        action="store_true",
+        help="Run duplicate-aware perception, filtering, merge, and assignment diagnostics without robot motion.",
+    )
+    parser.add_argument(
+        "--save_assignment_report",
+        action="store_true",
+        default=True,
+        help=f"Save duplicate-aware assignment JSON report to {DUPLICATE_ASSIGNMENT_REPORT_PATH}.",
+    )
+    parser.add_argument(
+        "--execute_pose_plan_json",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--execute_pose_plan_refine_only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--refine_pose_plan_json",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--refined_pose_plan_output_json",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no_pose_plan_refine",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--pose_plan_refine_before_execute",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--pose_plan_refine_radius_m", type=float, default=0.060, help=argparse.SUPPRESS)
+    parser.add_argument("--pose_plan_refine_tag_radius_m", type=float, default=0.080, help=argparse.SUPPRESS)
+    parser.add_argument("--min_after_grasp_z_mm", type=float, default=100.0, help=argparse.SUPPRESS)
     parser.add_argument("--recover_robot", action="store_true", help="Clear Lite6 warn/error and re-enable motion without moving home.")
     parser.add_argument("--home_only", action="store_true", help="Run only the checkpoint8-style move_gohome diagnostic.")
     parser.add_argument("--cube_color", choices=["auto", "red", "green", "blue"], default="auto")
@@ -335,6 +467,48 @@ class CubeTagPair:
 
 
 @dataclass(frozen=True)
+class DuplicateCubeTagGroup:
+    cube_prompt: str
+    tag_id: int
+    count: int
+
+
+@dataclass(frozen=True)
+class PresetCubeGroup:
+    cube_prompt: str
+    count: int
+
+
+@dataclass(frozen=True)
+class PresetSlot:
+    slot_id: int
+    x: float
+    y: float
+    z: float
+    yaw_deg: float = 0.0
+
+    @property
+    def center_robot(self) -> np.ndarray:
+        return np.array([self.x, self.y, self.z], dtype=np.float64)
+
+    def to_json_data(self) -> dict[str, float | int]:
+        return {
+            "slot_id": int(self.slot_id),
+            "x": float(self.x),
+            "y": float(self.y),
+            "z": float(self.z),
+            "yaw_deg": float(self.yaw_deg),
+        }
+
+
+@dataclass(frozen=True)
+class PresetLayout:
+    name: str
+    frame: str
+    slots: dict[int, PresetSlot]
+
+
+@dataclass(frozen=True)
 class Checkpoint8MultiPlanEntry:
     index: int
     cube_prompt: str
@@ -345,6 +519,137 @@ class Checkpoint8MultiPlanEntry:
     T_cam_tag: np.ndarray
     T_robot_place: np.ndarray
     T_cam_place: np.ndarray
+
+
+@dataclass(frozen=True)
+class DuplicateCubeCandidate:
+    cube_prompt: str
+    cube_color: str
+    instance_index: int
+    component_label: int
+    area_px: int
+    score: float
+    bbox_diag_m: float
+    max_extent_m: float
+    yaw_rad: float
+    T_robot_cube: np.ndarray
+    T_cam_cube: np.ndarray
+    center_robot: np.ndarray
+    member_candidate_indices: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class RejectedDuplicateCubeCandidate:
+    candidate: DuplicateCubeCandidate
+    rejection_reasons: list[str]
+
+
+@dataclass(frozen=True)
+class MergedDuplicateCubeCandidates:
+    physical_candidate: DuplicateCubeCandidate
+    merged_candidates: list[DuplicateCubeCandidate]
+    merge_distance_m: float
+
+    @property
+    def kept_candidate(self) -> DuplicateCubeCandidate:
+        return self.physical_candidate
+
+
+@dataclass(frozen=True)
+class DuplicateTagCandidate:
+    tag_id: int
+    instance_index: int
+    detection_index: int
+    decision_margin: float
+    hamming: int
+    T_robot_tag: np.ndarray
+    T_cam_tag: np.ndarray
+    center_robot: np.ndarray
+
+
+@dataclass(frozen=True)
+class DuplicateAssignedPair:
+    execution_index: int
+    group_index: int
+    within_group_index: int
+    cube_prompt: str
+    tag_id: int
+    cube: DuplicateCubeCandidate
+    tag: DuplicateTagCandidate
+    distance_m: float
+    T_robot_place: np.ndarray
+    T_cam_place: np.ndarray
+
+
+@dataclass(frozen=True)
+class PresetAssignedPair:
+    execution_index: int
+    group_index: int
+    within_group_index: int
+    cube_prompt: str
+    cube: DuplicateCubeCandidate
+    slot: PresetSlot
+    tag: DuplicateTagCandidate
+    distance_m: float
+    T_robot_place: np.ndarray
+    T_cam_place: np.ndarray
+    preset_use_slot_yaw: bool
+
+    @property
+    def tag_id(self) -> int:
+        return int(self.slot.slot_id)
+
+
+@dataclass(frozen=True)
+class DuplicatePosePlan:
+    execution_index: int
+    cube_prompt: str
+    target_tag_id: int
+    cube_instance_index: int
+    tag_instance_index: int
+    T_robot_cube: np.ndarray
+    T_robot_place: np.ndarray
+    target_source: str = "apriltag"
+    slot_id: int | None = None
+    preset_slot: dict[str, Any] | None = None
+    preset_use_slot_yaw: bool = False
+
+
+@dataclass(frozen=True)
+class PosePlanRefinement:
+    plan: DuplicatePosePlan
+    refined_cube: DuplicateCubeCandidate
+    refined_tag: DuplicateTagCandidate | None
+    T_robot_cube: np.ndarray
+    T_robot_place: np.ndarray
+    cube_delta_m: float
+    tag_delta_m: float
+
+
+@dataclass(frozen=True)
+class DuplicateAssignmentSelection:
+    selected_cubes: list[DuplicateCubeCandidate]
+    selected_tags: list[DuplicateTagCandidate]
+    tag_permutation: list[int]
+    distance_matrix: np.ndarray
+    pair_distances: list[float]
+    total_distance_m: float
+    objective: float
+
+
+@dataclass(frozen=True)
+class PresetAssignmentSelection:
+    selected_cubes: list[DuplicateCubeCandidate]
+    selected_slots: list[PresetSlot]
+    slot_permutation: list[int]
+    distance_matrix: np.ndarray
+    pair_distances: list[float]
+    total_distance_m: float
+    objective: float
+
+
+class PosePlanSafetyAbort(RuntimeError):
+    pass
 
 
 def _normalize_cube_prompt_key(prompt: str) -> str:
@@ -394,6 +699,137 @@ def parse_cube_tag_map(value: str | None) -> list[tuple[str, int]]:
     return pairs
 
 
+def parse_duplicate_cube_tag_map(value: str | None) -> list[dict[str, int | str]]:
+    if value is None or not str(value).strip():
+        raise ValueError("--duplicate_cube_tag_map must be a nonempty string.")
+
+    groups: list[dict[str, int | str]] = []
+    seen_groups: set[tuple[str, int]] = set()
+
+    for raw_index, raw_item in enumerate(str(value).split(","), start=1):
+        item = raw_item.strip()
+        if not item:
+            raise ValueError(f"entry {raw_index} is empty.")
+
+        parts = item.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError(f"entry {raw_index} must use the format 'cube prompt:tag_id:count'.")
+
+        prompt_text, tag_text, count_text = parts
+        cube_prompt = prompt_text.strip()
+        if not cube_prompt:
+            raise ValueError(f"entry {raw_index} has an empty cube prompt.")
+
+        tag_text = tag_text.strip()
+        if not tag_text:
+            raise ValueError(f"entry {raw_index} has an empty target tag ID.")
+        try:
+            tag_id = int(tag_text, 10)
+        except ValueError as exc:
+            raise ValueError(f"entry {raw_index} target tag ID is not an integer: {tag_text!r}.") from exc
+
+        count_text = count_text.strip()
+        if not count_text:
+            raise ValueError(f"entry {raw_index} has an empty count.")
+        try:
+            count = int(count_text, 10)
+        except ValueError as exc:
+            raise ValueError(f"entry {raw_index} count is not an integer: {count_text!r}.") from exc
+        if count <= 0:
+            raise ValueError(f"entry {raw_index} count must be a positive integer.")
+        if count > MAX_DUPLICATE_GROUP_COUNT:
+            raise ValueError(
+                f"entry {raw_index} count {count} is too large; maximum is {MAX_DUPLICATE_GROUP_COUNT}."
+            )
+
+        group_key = (_normalize_cube_prompt_key(cube_prompt), tag_id)
+        if group_key in seen_groups:
+            raise ValueError(f"duplicate cube prompt/tag ID group: {cube_prompt!r} -> tag {tag_id}.")
+
+        seen_groups.add(group_key)
+        groups.append({"cube_prompt": cube_prompt, "tag_id": tag_id, "count": count})
+
+    if not groups:
+        raise ValueError("--duplicate_cube_tag_map must contain at least one group.")
+    return groups
+
+
+def parse_preset_cube_counts(value: str | None) -> list[dict[str, int | str]]:
+    if value is None or not str(value).strip():
+        raise ValueError("--preset_cube_counts must be a nonempty string.")
+
+    groups: list[dict[str, int | str]] = []
+    seen_prompts: set[str] = set()
+    for raw_index, raw_item in enumerate(str(value).split(","), start=1):
+        item = raw_item.strip()
+        if not item:
+            raise ValueError(f"entry {raw_index} is empty.")
+        if ":" not in item:
+            raise ValueError(f"entry {raw_index} must use the format 'cube prompt:count'.")
+        prompt_text, count_text = item.rsplit(":", 1)
+        cube_prompt = prompt_text.strip()
+        if not cube_prompt:
+            raise ValueError(f"entry {raw_index} has an empty cube prompt.")
+        try:
+            count = int(count_text.strip(), 10)
+        except ValueError as exc:
+            raise ValueError(f"entry {raw_index} count is not an integer: {count_text!r}.") from exc
+        if count <= 0:
+            raise ValueError(f"entry {raw_index} count must be a positive integer.")
+        if count > MAX_DUPLICATE_GROUP_COUNT:
+            raise ValueError(
+                f"entry {raw_index} count {count} is too large; maximum is {MAX_DUPLICATE_GROUP_COUNT}."
+            )
+        prompt_key = _normalize_cube_prompt_key(cube_prompt)
+        if prompt_key in seen_prompts:
+            raise ValueError(f"duplicate cube prompt: {cube_prompt!r}.")
+        seen_prompts.add(prompt_key)
+        groups.append({"cube_prompt": cube_prompt, "count": count})
+
+    if not groups:
+        raise ValueError("--preset_cube_counts must contain at least one group.")
+    return groups
+
+
+def parse_preset_cube_slot_map(value: str | None) -> list[dict[str, Any]]:
+    if value is None or not str(value).strip():
+        raise ValueError("--preset_cube_slot_map must be a nonempty string.")
+
+    groups: list[dict[str, Any]] = []
+    seen_prompts: set[str] = set()
+    for raw_index, raw_item in enumerate(str(value).split(";"), start=1):
+        item = raw_item.strip()
+        if not item:
+            raise ValueError(f"entry {raw_index} is empty.")
+        if ":" not in item:
+            raise ValueError(f"entry {raw_index} must use the format 'cube prompt:slot_id,slot_id'.")
+        prompt_text, slots_text = item.rsplit(":", 1)
+        cube_prompt = prompt_text.strip()
+        if not cube_prompt:
+            raise ValueError(f"entry {raw_index} has an empty cube prompt.")
+        slot_ids: list[int] = []
+        for slot_index, raw_slot in enumerate(slots_text.split(","), start=1):
+            slot_text = raw_slot.strip()
+            if not slot_text:
+                raise ValueError(f"entry {raw_index} slot {slot_index} is empty.")
+            try:
+                slot_id = int(slot_text, 10)
+            except ValueError as exc:
+                raise ValueError(f"entry {raw_index} slot {slot_index} is not an integer: {slot_text!r}.") from exc
+            slot_ids.append(slot_id)
+        if not slot_ids:
+            raise ValueError(f"entry {raw_index} must contain at least one slot ID.")
+        prompt_key = _normalize_cube_prompt_key(cube_prompt)
+        if prompt_key in seen_prompts:
+            raise ValueError(f"duplicate cube prompt: {cube_prompt!r}.")
+        seen_prompts.add(prompt_key)
+        groups.append({"cube_prompt": cube_prompt, "slot_ids": slot_ids})
+
+    if not groups:
+        raise ValueError("--preset_cube_slot_map must contain at least one group.")
+    return groups
+
+
 def _cube_tag_pairs_from_args(args: argparse.Namespace) -> list[CubeTagPair]:
     raw_pairs = getattr(args, "_cube_tag_pairs", None)
     if raw_pairs is None:
@@ -402,7 +838,370 @@ def _cube_tag_pairs_from_args(args: argparse.Namespace) -> list[CubeTagPair]:
     return [CubeTagPair(cube_prompt=prompt, target_tag_id=tag_id) for prompt, tag_id in raw_pairs]
 
 
+def _duplicate_groups_from_args(args: argparse.Namespace) -> list[DuplicateCubeTagGroup]:
+    raw_groups = getattr(args, "_duplicate_cube_tag_groups", None)
+    if raw_groups is None:
+        raw_groups = parse_duplicate_cube_tag_map(args.duplicate_cube_tag_map)
+        args._duplicate_cube_tag_groups = raw_groups
+    return [
+        DuplicateCubeTagGroup(
+            cube_prompt=str(group["cube_prompt"]),
+            tag_id=int(group["tag_id"]),
+            count=int(group["count"]),
+        )
+        for group in raw_groups
+    ]
+
+
+def _preset_groups_from_args(args: argparse.Namespace) -> list[PresetCubeGroup]:
+    raw_groups = getattr(args, "_preset_cube_count_groups", None)
+    if raw_groups is None:
+        raw_groups = parse_preset_cube_counts(args.preset_cube_counts)
+        args._preset_cube_count_groups = raw_groups
+    return [
+        PresetCubeGroup(cube_prompt=str(group["cube_prompt"]), count=int(group["count"]))
+        for group in raw_groups
+    ]
+
+
+def _preset_slot_map_from_args(args: argparse.Namespace) -> dict[str, list[int]]:
+    raw_map = getattr(args, "_preset_cube_slot_map_groups", None)
+    if raw_map is None:
+        raw_map = parse_preset_cube_slot_map(args.preset_cube_slot_map)
+        args._preset_cube_slot_map_groups = raw_map
+    return {
+        _normalize_cube_prompt_key(str(group["cube_prompt"])): [int(slot_id) for slot_id in group["slot_ids"]]
+        for group in raw_map
+    }
+
+
+def _cube_color_from_prompt(cube_prompt: str) -> str:
+    normalized = _normalize_cube_prompt_key(cube_prompt).replace("-", " ").replace("_", " ")
+    tokens = set(normalized.split())
+    matches = [color for color in ("red", "green", "blue") if color in tokens]
+    if len(matches) != 1:
+        raise ValueError(
+            f"cube prompt {cube_prompt!r} must contain exactly one supported color word: red, green, or blue."
+        )
+    return matches[0]
+
+
+def parse_candidate_merge_prompts(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    prompts: list[str] = []
+    seen: set[str] = set()
+    for raw_item in str(value).split(","):
+        prompt = raw_item.strip()
+        if not prompt:
+            continue
+        key = _normalize_cube_prompt_key(prompt)
+        if key in seen:
+            continue
+        seen.add(key)
+        prompts.append(prompt)
+    return prompts
+
+
+def _candidate_merge_prompt_keys_from_args(args: argparse.Namespace) -> set[str]:
+    raw_prompts = getattr(args, "_candidate_merge_prompts", None)
+    if raw_prompts is None:
+        raw_prompts = parse_candidate_merge_prompts(args.candidate_merge_prompts)
+        args._candidate_merge_prompts = raw_prompts
+    return {_normalize_cube_prompt_key(prompt) for prompt in raw_prompts}
+
+
+def _candidate_merge_enabled_for_prompt(args: argparse.Namespace, cube_prompt: str) -> bool:
+    return _normalize_cube_prompt_key(cube_prompt) in _candidate_merge_prompt_keys_from_args(args)
+
+
+def _resolve_repo_path(path: str | Path) -> Path:
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = REPO_ROOT / resolved
+    return resolved
+
+
+def _preset_slot_from_json_data(data: Any, index: int) -> PresetSlot:
+    if not isinstance(data, dict):
+        raise ValueError(f"slot {index} must be an object.")
+    required = ["slot_id", "x", "y", "z"]
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ValueError(f"slot {index} is missing required keys: {', '.join(missing)}")
+    try:
+        slot_id = int(data["slot_id"])
+        x = float(data["x"])
+        y = float(data["y"])
+        z = float(data["z"])
+        yaw_deg = float(data.get("yaw_deg", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"slot {index} contains non-numeric values.") from exc
+    values = np.array([x, y, z, yaw_deg], dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError(f"slot {index} contains non-finite values.")
+    return PresetSlot(slot_id=slot_id, x=x, y=y, z=z, yaw_deg=yaw_deg)
+
+
+def load_preset_place_layout_json(path: str | Path) -> PresetLayout:
+    layout_path = _resolve_repo_path(path)
+    with layout_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("preset layout JSON root must be an object.")
+    name = str(data.get("name", "")).strip()
+    if not name:
+        raise ValueError("preset layout JSON name must be nonempty.")
+    frame = str(data.get("frame", "")).strip()
+    if frame != "robot_base":
+        raise ValueError("preset layout JSON frame must be 'robot_base'.")
+    raw_slots = data.get("slots")
+    if not isinstance(raw_slots, list) or not raw_slots:
+        raise ValueError("preset layout JSON slots must be a nonempty list.")
+
+    slots: dict[int, PresetSlot] = {}
+    for index, raw_slot in enumerate(raw_slots, start=1):
+        slot = _preset_slot_from_json_data(raw_slot, index)
+        if slot.slot_id in slots:
+            raise ValueError(f"duplicate preset slot ID: {slot.slot_id}.")
+        slots[slot.slot_id] = slot
+    return PresetLayout(name=name, frame=frame, slots=slots)
+
+
+def _preset_counts_by_prompt(groups: list[dict[str, int | str]] | list[PresetCubeGroup]) -> dict[str, tuple[str, int]]:
+    counts: dict[str, tuple[str, int]] = {}
+    for group in groups:
+        if isinstance(group, PresetCubeGroup):
+            cube_prompt = group.cube_prompt
+            count = group.count
+        else:
+            cube_prompt = str(group["cube_prompt"])
+            count = int(group["count"])
+        counts[_normalize_cube_prompt_key(cube_prompt)] = (cube_prompt, int(count))
+    return counts
+
+
+def _preset_slot_map_by_prompt(groups: list[dict[str, Any]] | dict[str, list[int]]) -> dict[str, list[int]]:
+    if isinstance(groups, dict):
+        return {str(key): [int(slot_id) for slot_id in value] for key, value in groups.items()}
+    return {
+        _normalize_cube_prompt_key(str(group["cube_prompt"])): [int(slot_id) for slot_id in group["slot_ids"]]
+        for group in groups
+    }
+
+
+def validate_preset_layout_request(
+    layout: PresetLayout,
+    cube_counts: list[dict[str, int | str]] | list[PresetCubeGroup],
+    cube_slot_map: list[dict[str, Any]] | dict[str, list[int]],
+    slot_minimum_mm: np.ndarray,
+    slot_maximum_mm: np.ndarray,
+    allow_outside_workspace: bool = False,
+) -> None:
+    counts = _preset_counts_by_prompt(cube_counts)
+    slot_map = _preset_slot_map_by_prompt(cube_slot_map)
+    count_keys = set(counts)
+    map_keys = set(slot_map)
+    missing_from_map = count_keys - map_keys
+    unknown_in_map = map_keys - count_keys
+    if missing_from_map:
+        prompts = ", ".join(counts[key][0] for key in sorted(missing_from_map))
+        raise ValueError(f"preset slot map is missing prompts from counts: {prompts}.")
+    if unknown_in_map:
+        prompts = ", ".join(sorted(unknown_in_map))
+        raise ValueError(f"preset slot map contains prompts not present in counts: {prompts}.")
+
+    seen_slot_ids: set[int] = set()
+    for prompt_key, slot_ids in slot_map.items():
+        cube_prompt, count = counts[prompt_key]
+        if len(slot_ids) != count:
+            raise ValueError(
+                f"preset slot count mismatch for {cube_prompt!r}: "
+                f"count is {count}, but slot map has {len(slot_ids)} slots."
+            )
+        for slot_id in slot_ids:
+            if slot_id not in layout.slots:
+                raise ValueError(f"preset slot ID {slot_id} for {cube_prompt!r} does not exist in layout.")
+            if slot_id in seen_slot_ids:
+                raise ValueError(f"duplicate preset slot ID in slot map: {slot_id}.")
+            seen_slot_ids.add(slot_id)
+
+    if allow_outside_workspace:
+        return
+
+    for slot in layout.slots.values():
+        point_mm = slot.center_robot * 1000.0
+        if not _point_in_bounds_mm(point_mm, slot_minimum_mm, slot_maximum_mm):
+            raise ValueError(
+                f"preset slot {slot.slot_id} is outside the conservative contact workspace: "
+                f"point={np.array2string(point_mm, precision=1)}mm "
+                f"bounds={_format_mm_bounds(slot_minimum_mm, slot_maximum_mm)}."
+            )
+
+
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.execute_pose_plan_refine_only and not args.execute_pose_plan_json:
+        raise SystemExit("--execute_pose_plan_refine_only requires --execute_pose_plan_json.")
+    if float(args.pose_plan_refine_radius_m) <= 0.0:
+        raise SystemExit("--pose_plan_refine_radius_m must be positive.")
+    if float(args.pose_plan_refine_tag_radius_m) <= 0.0:
+        raise SystemExit("--pose_plan_refine_tag_radius_m must be positive.")
+    if float(args.min_after_grasp_z_mm) <= 0.0:
+        raise SystemExit("--min_after_grasp_z_mm must be positive.")
+
+    refine_mode_requested = bool(args.refine_pose_plan_json or args.refined_pose_plan_output_json)
+    if refine_mode_requested:
+        if args.execution_backend != "checkpoint8_style":
+            raise SystemExit("--refine_pose_plan_json is only supported with --execution_backend checkpoint8_style.")
+        if not args.refine_pose_plan_json:
+            raise SystemExit("--refined_pose_plan_output_json requires --refine_pose_plan_json.")
+        if not args.refined_pose_plan_output_json:
+            raise SystemExit("--refine_pose_plan_json requires --refined_pose_plan_output_json.")
+        if args.execute_pose_plan_json:
+            raise SystemExit("--refine_pose_plan_json cannot be combined with --execute_pose_plan_json.")
+        if args.no_pose_plan_refine:
+            raise SystemExit("--no_pose_plan_refine is only valid with --execute_pose_plan_json.")
+        return
+
+    if args.execute_pose_plan_json:
+        if args.no_pose_plan_refine and args.execute_pose_plan_refine_only:
+            raise SystemExit("--no_pose_plan_refine cannot be combined with --execute_pose_plan_refine_only.")
+        if args.no_pose_plan_refine:
+            args.pose_plan_refine_before_execute = False
+        if args.pose_plan_refine_before_execute is None:
+            args.pose_plan_refine_before_execute = True
+        if args.execution_backend != "checkpoint8_style":
+            raise SystemExit("--execute_pose_plan_json is only supported with --execution_backend checkpoint8_style.")
+        if args.skip_home or args.no_final_home:
+            raise SystemExit("--execute_pose_plan_json requires checkpoint8-style home behavior; do not use --skip_home or --no_final_home.")
+        conflicting_flags = [
+            "--place_to_tag" if args.place_to_tag else None,
+            "--multi_place_to_tags" if args.multi_place_to_tags else None,
+            "--duplicate_aware_multi_place" if args.duplicate_aware_multi_place else None,
+            "--cube_tag_map" if args.cube_tag_map else None,
+            "--duplicate_cube_tag_map" if args.duplicate_cube_tag_map else None,
+        ]
+        conflicts = [flag for flag in conflicting_flags if flag is not None]
+        if conflicts:
+            raise SystemExit("--execute_pose_plan_json cannot be combined with " + ", ".join(conflicts) + ".")
+        return
+
+    if args.pose_plan_refine_before_execute is None:
+        args.pose_plan_refine_before_execute = False
+    if args.no_pose_plan_refine:
+        raise SystemExit("--no_pose_plan_refine is only valid with --execute_pose_plan_json.")
+
+    if args.preset_layout_place:
+        if args.execution_backend != "checkpoint8_style":
+            raise SystemExit("--preset_layout_place is only supported with --execution_backend checkpoint8_style.")
+        conflicting_flags = [
+            "--place_to_tag" if args.place_to_tag else None,
+            "--multi_place_to_tags" if args.multi_place_to_tags else None,
+            "--duplicate_aware_multi_place" if args.duplicate_aware_multi_place else None,
+            "--cube_tag_map" if args.cube_tag_map else None,
+            "--duplicate_cube_tag_map" if args.duplicate_cube_tag_map else None,
+        ]
+        conflicts = [flag for flag in conflicting_flags if flag is not None]
+        if conflicts:
+            raise SystemExit("--preset_layout_place cannot be combined with " + ", ".join(conflicts) + ".")
+        if not args.preset_place_layout_json:
+            raise SystemExit("--preset_layout_place requires --preset_place_layout_json.")
+        if not args.preset_cube_counts:
+            raise SystemExit("--preset_layout_place requires --preset_cube_counts.")
+        if not args.preset_cube_slot_map:
+            raise SystemExit("--preset_layout_place requires --preset_cube_slot_map.")
+        if args.skip_home or args.no_final_home:
+            raise SystemExit(
+                "--preset_layout_place requires checkpoint8-style home behavior; "
+                "do not use --skip_home or --no_final_home."
+            )
+        try:
+            args._preset_cube_count_groups = parse_preset_cube_counts(args.preset_cube_counts)
+            args._preset_cube_slot_map_groups = parse_preset_cube_slot_map(args.preset_cube_slot_map)
+            for group in _preset_groups_from_args(args):
+                _cube_color_from_prompt(group.cube_prompt)
+            args._preset_layout = load_preset_place_layout_json(args.preset_place_layout_json)
+            preset_minimum_mm, preset_maximum_mm = _task_gate_bounds_from_args(args)
+            validate_preset_layout_request(
+                layout=args._preset_layout,
+                cube_counts=args._preset_cube_count_groups,
+                cube_slot_map=args._preset_cube_slot_map_groups,
+                slot_minimum_mm=preset_minimum_mm,
+                slot_maximum_mm=preset_maximum_mm,
+                allow_outside_workspace=args.allow_preset_slots_outside_workspace,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"Invalid preset layout placement configuration: {exc}") from exc
+        return
+
+    if args.preset_place_layout_json or args.preset_cube_counts or args.preset_cube_slot_map:
+        raise SystemExit("--preset_place_layout_json/--preset_cube_counts/--preset_cube_slot_map require --preset_layout_place.")
+    if args.preset_use_slot_yaw:
+        raise SystemExit("--preset_use_slot_yaw is only valid with --preset_layout_place.")
+    if args.allow_preset_slots_outside_workspace:
+        raise SystemExit("--allow_preset_slots_outside_workspace is only valid with --preset_layout_place.")
+
+    if args.duplicate_aware_multi_place:
+        if args.execution_backend != "checkpoint8_style":
+            raise SystemExit("--duplicate_aware_multi_place is only supported with --execution_backend checkpoint8_style.")
+        if args.place_to_tag:
+            raise SystemExit("--place_to_tag cannot be combined with --duplicate_aware_multi_place.")
+        if args.multi_place_to_tags:
+            raise SystemExit("--multi_place_to_tags cannot be combined with --duplicate_aware_multi_place.")
+        if args.cube_tag_map:
+            raise SystemExit("--duplicate_aware_multi_place cannot be combined with --cube_tag_map; use --duplicate_cube_tag_map.")
+        if not args.duplicate_cube_tag_map:
+            raise SystemExit(
+                "--duplicate_aware_multi_place requires --duplicate_cube_tag_map, "
+                'for example "red cube:6:2,green cube:8:2".'
+            )
+        if getattr(args, "_target_tag_size_m_arg", None) is None:
+            raise SystemExit("--duplicate_aware_multi_place requires an explicit --target_tag_size_m value.")
+        if args.skip_home or args.no_final_home:
+            raise SystemExit(
+                "--duplicate_aware_multi_place requires checkpoint8-style home behavior; "
+                "do not use --skip_home or --no_final_home."
+            )
+        if float(args.max_assignment_distance_m) <= 0.0:
+            raise SystemExit("--max_assignment_distance_m must be positive.")
+        if int(args.candidate_min_area_px) < 0:
+            raise SystemExit("--candidate_min_area_px must be nonnegative.")
+        if float(args.candidate_merge_distance_m) <= 0.0:
+            raise SystemExit("--candidate_merge_distance_m must be positive.")
+        if float(args.candidate_min_extent_m) < 0.0:
+            raise SystemExit("--candidate_min_extent_m must be nonnegative.")
+        if float(args.candidate_max_extent_m) <= 0.0:
+            raise SystemExit("--candidate_max_extent_m must be positive.")
+        if float(args.candidate_min_extent_m) > float(args.candidate_max_extent_m):
+            raise SystemExit("--candidate_min_extent_m must be less than or equal to --candidate_max_extent_m.")
+        for flag_name in ("green_candidate_min_area_px", "red_candidate_min_area_px", "blue_candidate_min_area_px"):
+            if int(getattr(args, flag_name)) < 0:
+                raise SystemExit(f"--{flag_name} must be nonnegative.")
+        args._candidate_merge_prompts = parse_candidate_merge_prompts(args.candidate_merge_prompts)
+        candidate_bounds = [
+            ("x", args.candidate_x_min_m, args.candidate_x_max_m),
+            ("y", args.candidate_y_min_m, args.candidate_y_max_m),
+            ("z", args.candidate_z_min_m, args.candidate_z_max_m),
+        ]
+        for axis_name, minimum, maximum in candidate_bounds:
+            if float(minimum) > float(maximum):
+                raise SystemExit(
+                    f"Invalid duplicate-aware candidate {axis_name} bounds: "
+                    f"minimum {float(minimum):.3f} m is greater than maximum {float(maximum):.3f} m."
+                )
+        try:
+            args._duplicate_cube_tag_groups = parse_duplicate_cube_tag_map(args.duplicate_cube_tag_map)
+            for group in _duplicate_groups_from_args(args):
+                _cube_color_from_prompt(group.cube_prompt)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --duplicate_cube_tag_map: {exc}") from exc
+        return
+
+    if args.duplicate_cube_tag_map:
+        raise SystemExit("--duplicate_cube_tag_map is only valid when --duplicate_aware_multi_place is used.")
+    if args.debug_duplicate_candidates_only:
+        raise SystemExit("--debug_duplicate_candidates_only is only valid when --duplicate_aware_multi_place is used.")
+
     if args.multi_place_to_tags:
         if args.execution_backend != "checkpoint8_style":
             raise SystemExit("--multi_place_to_tags is only supported with --execution_backend checkpoint8_style.")
@@ -909,6 +1708,199 @@ def estimate_cube_pose(
         f" grasp={math.degrees(grasp_yaw):.1f} deg"
     )
     return T_base_cube, T_cam_cube, mask
+
+
+def _detect_duplicate_cube_candidates(
+    image: np.ndarray,
+    point_cloud: np.ndarray,
+    T_cam_robot: np.ndarray,
+    cube_prompt: str,
+    cube_size_m: float,
+    table_z_m: float,
+    point_cloud_scale: float,
+) -> list[DuplicateCubeCandidate]:
+    if image is None or point_cloud is None:
+        return []
+    if point_cloud.ndim != 3 or point_cloud.shape[-1] < 3:
+        raise RuntimeError(f"Invalid point cloud shape: {point_cloud.shape}")
+    if image.shape[:2] != point_cloud.shape[:2]:
+        raise RuntimeError(f"Image/point cloud shape mismatch: image={image.shape}, point_cloud={point_cloud.shape}")
+
+    cube_color = _cube_color_from_prompt(cube_prompt)
+    bgr = _bgr_from_image(image)
+    mask = _segment_mask_from_color(bgr, cube_color)
+    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num_labels <= 1:
+        return []
+
+    image_h, image_w = mask.shape[:2]
+    cube_diag = float(cube_size_m) * math.sqrt(3.0)
+    T_robot_cam = np.linalg.inv(T_cam_robot)
+    scored: list[tuple[float, int, DuplicateCubeCandidate]] = []
+
+    for label in range(1, num_labels):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area_px = int(stats[label, cv2.CC_STAT_AREA])
+        if area_px < 40:
+            continue
+
+        component_mask = labels == label
+        points_cam = _points_from_mask(point_cloud, component_mask, point_cloud_scale)
+        if points_cam.shape[0] < MIN_POINTS_AFTER_OUTLIER:
+            continue
+
+        trimmed_cam = _statistical_outlier_trim(points_cam, nb_neighbors=12, std_ratio=2.0)
+        if trimmed_cam.shape[0] < MIN_POINTS_AFTER_OUTLIER:
+            continue
+
+        extent = _robust_extent(trimmed_cam)
+        bbox_diag = float(np.linalg.norm(extent))
+        max_extent = float(extent.max())
+        touches_border = (
+            x <= 1
+            or y <= 1
+            or (x + w) >= (image_w - 1)
+            or (y + h) >= (image_h - 1)
+        )
+
+        score = abs(bbox_diag - cube_diag)
+        score += max(0.0, max_extent - (float(cube_size_m) * 1.8)) * 3.0
+        if touches_border:
+            score += 0.25
+
+        fit_points_cam = _statistical_outlier_trim(trimmed_cam, nb_neighbors=24, std_ratio=2.5)
+        if fit_points_cam.shape[0] < MIN_POINTS_AFTER_OUTLIER:
+            continue
+
+        points_robot = _transform_points(fit_points_cam, T_robot_cam)
+        if not np.isfinite(points_robot).all():
+            continue
+
+        xy_lo = np.percentile(points_robot[:, :2], 10.0, axis=0)
+        xy_hi = np.percentile(points_robot[:, :2], 90.0, axis=0)
+        center_robot = np.array(
+            [
+                0.5 * (xy_lo[0] + xy_hi[0]),
+                0.5 * (xy_lo[1] + xy_hi[1]),
+                float(table_z_m) + float(cube_size_m) * 0.5 + GRASP_Z_BIAS_M,
+            ],
+            dtype=np.float64,
+        )
+
+        cube_yaw = _estimate_cube_yaw_on_table(points_robot)
+        grasp_yaw = _select_preferred_grasp_yaw(cube_yaw)
+        T_robot_cube = np.eye(4, dtype=np.float64)
+        T_robot_cube[:3, :3] = _top_down_rotation(grasp_yaw)
+        T_robot_cube[:3, 3] = center_robot
+        T_cam_cube = T_cam_robot @ T_robot_cube
+
+        candidate = DuplicateCubeCandidate(
+            cube_prompt=cube_prompt,
+            cube_color=cube_color,
+            instance_index=0,
+            component_label=label,
+            area_px=area_px,
+            score=float(score),
+            bbox_diag_m=float(bbox_diag),
+            max_extent_m=float(max_extent),
+            yaw_rad=float(grasp_yaw),
+            T_robot_cube=T_robot_cube,
+            T_cam_cube=T_cam_cube,
+            center_robot=center_robot,
+            member_candidate_indices=(0,),
+        )
+        scored.append((float(score), label, candidate))
+
+    scored.sort(key=lambda item: (item[0], item[1]))
+    candidates: list[DuplicateCubeCandidate] = []
+    for instance_index, (_score, _label, candidate) in enumerate(scored, start=1):
+        candidates.append(
+            DuplicateCubeCandidate(
+                cube_prompt=candidate.cube_prompt,
+                cube_color=candidate.cube_color,
+                instance_index=instance_index,
+                component_label=candidate.component_label,
+                area_px=candidate.area_px,
+                score=candidate.score,
+                bbox_diag_m=candidate.bbox_diag_m,
+                max_extent_m=candidate.max_extent_m,
+                yaw_rad=candidate.yaw_rad,
+                T_robot_cube=candidate.T_robot_cube,
+                T_cam_cube=candidate.T_cam_cube,
+                center_robot=candidate.center_robot,
+                member_candidate_indices=(instance_index,),
+            )
+        )
+    return candidates
+
+
+def _detect_duplicate_target_tag_candidates(
+    image: np.ndarray,
+    camera_intrinsic: np.ndarray,
+    T_cam_robot: np.ndarray,
+    target_tag_id: int,
+    target_tag_size_m: float,
+) -> list[DuplicateTagCandidate]:
+    pose_tags = _detect_tags(
+        image,
+        estimate_pose=True,
+        camera_intrinsic=camera_intrinsic,
+        tag_size_m=target_tag_size_m,
+    )
+    detected_ids = [int(tag.tag_id) for tag in pose_tags]
+    print(f"AprilTags detected with duplicate-aware target pose solve: {detected_ids}")
+    print(f"Target tag size assumption: {float(target_tag_size_m):.4f} m for tag ID {target_tag_id}.")
+
+    T_robot_cam = np.linalg.inv(T_cam_robot)
+    scored: list[tuple[float, int, int, DuplicateTagCandidate]] = []
+    for detection_index, tag in enumerate(pose_tags):
+        if int(tag.tag_id) != int(target_tag_id):
+            continue
+        if tag.pose_R is None or tag.pose_t is None:
+            print(f"Skipping tag {target_tag_id} detection {detection_index}: pose estimation unavailable.")
+            continue
+
+        T_cam_tag = np.eye(4, dtype=np.float64)
+        T_cam_tag[:3, :3] = np.asarray(tag.pose_R, dtype=np.float64).reshape(3, 3)
+        T_cam_tag[:3, 3] = np.asarray(tag.pose_t, dtype=np.float64).reshape(3)
+        T_robot_tag = T_robot_cam @ T_cam_tag
+        if not np.isfinite(T_robot_tag).all():
+            print(f"Skipping tag {target_tag_id} detection {detection_index}: non-finite robot-frame pose.")
+            continue
+
+        decision_margin = float(getattr(tag, "decision_margin", 0.0) or 0.0)
+        hamming = int(getattr(tag, "hamming", 0) or 0)
+        candidate = DuplicateTagCandidate(
+            tag_id=int(target_tag_id),
+            instance_index=0,
+            detection_index=int(detection_index),
+            decision_margin=decision_margin,
+            hamming=hamming,
+            T_robot_tag=T_robot_tag,
+            T_cam_tag=T_cam_tag,
+            center_robot=np.asarray(T_robot_tag[:3, 3], dtype=np.float64).copy(),
+        )
+        scored.append((-decision_margin, hamming, detection_index, candidate))
+
+    scored.sort(key=lambda item: (item[0], item[1], item[2]))
+    candidates: list[DuplicateTagCandidate] = []
+    for instance_index, (_neg_margin, _hamming, _detection_index, candidate) in enumerate(scored, start=1):
+        candidates.append(
+            DuplicateTagCandidate(
+                tag_id=candidate.tag_id,
+                instance_index=instance_index,
+                detection_index=candidate.detection_index,
+                decision_margin=candidate.decision_margin,
+                hamming=candidate.hamming,
+                T_robot_tag=candidate.T_robot_tag,
+                T_cam_tag=candidate.T_cam_tag,
+                center_robot=candidate.center_robot,
+            )
+        )
+    return candidates
 
 
 def _yaw_from_pose_xy(T_base_tag: np.ndarray) -> float:
@@ -2001,6 +2993,27 @@ def _checkpoint8_target_pose_from_tag(T_base_cube: np.ndarray, T_base_tag: np.nd
     return T_base_target
 
 
+def _preset_place_pose_from_slot(
+    T_base_cube: np.ndarray,
+    slot: PresetSlot,
+    preset_use_slot_yaw: bool,
+) -> np.ndarray:
+    T_base_target = np.eye(4, dtype=np.float64)
+    if preset_use_slot_yaw:
+        T_base_target[:3, :3] = _top_down_rotation(math.radians(float(slot.yaw_deg)))
+    else:
+        T_base_target[:3, :3] = T_base_cube[:3, :3]
+    T_base_target[0, 3] = float(slot.x)
+    T_base_target[1, 3] = float(slot.y)
+    T_base_target[2, 3] = float(T_base_cube[2, 3])
+    print(
+        "Constructed preset-slot placement pose: "
+        "using preset slot x/y, source cube contact z, and "
+        + ("slot yaw." if preset_use_slot_yaw else "source cube rotation.")
+    )
+    return T_base_target
+
+
 def _checkpoint8_save_or_confirm(
     display: np.ndarray,
     no_gui: bool,
@@ -2129,6 +3142,970 @@ def _checkpoint8_print_multi_plan_table(entries: list[Checkpoint8MultiPlanEntry]
             f"{_checkpoint8_format_xyz_mm(entry.T_robot_tag)} | "
             f"{_checkpoint8_format_xyz_mm(entry.T_robot_place)}"
         )
+
+
+def _center_xyz_mm(center_m: np.ndarray) -> str:
+    point = np.asarray(center_m, dtype=np.float64) * 1000.0
+    return f"{point[0]:.1f}/{point[1]:.1f}/{point[2]:.1f}"
+
+
+def select_nearest_refined_candidate(
+    candidates: list[Any],
+    planned_xy_m: np.ndarray,
+    max_distance_m: float,
+    label: str,
+) -> tuple[Any, float]:
+    if float(max_distance_m) <= 0.0:
+        raise ValueError("max_distance_m must be positive.")
+    if not candidates:
+        raise ValueError(f"No refined {label} candidates were detected.")
+
+    planned_xy = np.asarray(planned_xy_m, dtype=np.float64).reshape(-1)
+    if planned_xy.shape[0] < 2 or not np.isfinite(planned_xy[:2]).all():
+        raise ValueError(f"planned {label} x/y must contain finite values.")
+
+    ranked: list[tuple[float, int, Any]] = []
+    for index, candidate in enumerate(candidates):
+        center = np.asarray(candidate.center_robot, dtype=np.float64).reshape(-1)
+        if center.shape[0] < 2 or not np.isfinite(center[:2]).all():
+            continue
+        distance_m = float(np.linalg.norm(center[:2] - planned_xy[:2]))
+        ranked.append((distance_m, int(getattr(candidate, "instance_index", index + 1)), candidate))
+
+    if not ranked:
+        raise ValueError(f"No refined {label} candidates had finite x/y centers.")
+
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    distance_m, _instance_index, candidate = ranked[0]
+    if distance_m > float(max_distance_m):
+        raise ValueError(
+            f"Nearest refined {label} candidate is {distance_m * 1000.0:.1f} mm from the planned pose, "
+            f"exceeding the allowed radius {float(max_distance_m) * 1000.0:.1f} mm."
+        )
+    return candidate, distance_m
+
+
+def _candidate_filter_reasons(
+    candidate: DuplicateCubeCandidate,
+    x_min_m: float,
+    x_max_m: float,
+    y_min_m: float,
+    y_max_m: float,
+    z_min_m: float,
+    z_max_m: float,
+    min_area_px: int,
+    red_min_area_px: int,
+    green_min_area_px: int,
+    blue_min_area_px: int,
+    min_extent_m: float,
+    max_extent_m: float,
+) -> list[str]:
+    center = np.asarray(candidate.center_robot, dtype=np.float64)
+    bounds = [
+        ("x", float(center[0]), float(x_min_m), float(x_max_m)),
+        ("y", float(center[1]), float(y_min_m), float(y_max_m)),
+        ("z", float(center[2]), float(z_min_m), float(z_max_m)),
+    ]
+    reasons: list[str] = []
+    for axis_name, value_m, minimum_m, maximum_m in bounds:
+        if value_m < minimum_m or value_m > maximum_m:
+            reasons.append(
+                f"{axis_name}={round(value_m * 1000.0):.0f}mm outside "
+                f"[{round(minimum_m * 1000.0):.0f},{round(maximum_m * 1000.0):.0f}]mm"
+            )
+    color_area_minima = {
+        "red": int(red_min_area_px),
+        "green": int(green_min_area_px),
+        "blue": int(blue_min_area_px),
+    }
+    effective_min_area_px = max(int(min_area_px), color_area_minima.get(candidate.cube_color, int(min_area_px)))
+    if int(candidate.area_px) < effective_min_area_px:
+        reasons.append(f"area {int(candidate.area_px)} < {effective_min_area_px}")
+
+    bbox_diag_m = float(getattr(candidate, "bbox_diag_m", math.nan))
+    max_candidate_extent_m = float(getattr(candidate, "max_extent_m", math.nan))
+    if math.isfinite(max_candidate_extent_m):
+        if max_candidate_extent_m < float(min_extent_m):
+            reasons.append(f"max_extent={max_candidate_extent_m * 1000.0:.1f}mm < {float(min_extent_m) * 1000.0:.1f}mm")
+        if max_candidate_extent_m > float(max_extent_m):
+            reasons.append(f"max_extent={max_candidate_extent_m * 1000.0:.1f}mm > {float(max_extent_m) * 1000.0:.1f}mm")
+    elif math.isfinite(bbox_diag_m):
+        if bbox_diag_m < float(min_extent_m):
+            reasons.append(f"bbox_diag={bbox_diag_m * 1000.0:.1f}mm < {float(min_extent_m) * 1000.0:.1f}mm")
+        max_bbox_diag_m = float(max_extent_m) * math.sqrt(3.0)
+        if bbox_diag_m > max_bbox_diag_m:
+            reasons.append(f"bbox_diag={bbox_diag_m * 1000.0:.1f}mm > {max_bbox_diag_m * 1000.0:.1f}mm")
+    return reasons
+
+
+def filter_duplicate_cube_candidates(
+    candidates: list[DuplicateCubeCandidate],
+    x_min_m: float,
+    x_max_m: float,
+    y_min_m: float,
+    y_max_m: float,
+    z_min_m: float,
+    z_max_m: float,
+    min_area_px: int,
+    red_min_area_px: int = 500,
+    green_min_area_px: int = 1200,
+    blue_min_area_px: int = 500,
+    min_extent_m: float = 0.012,
+    max_extent_m: float = 0.040,
+) -> tuple[list[DuplicateCubeCandidate], list[RejectedDuplicateCubeCandidate]]:
+    valid_candidates: list[DuplicateCubeCandidate] = []
+    rejected_candidates: list[RejectedDuplicateCubeCandidate] = []
+    for candidate in candidates:
+        reasons = _candidate_filter_reasons(
+            candidate=candidate,
+            x_min_m=x_min_m,
+            x_max_m=x_max_m,
+            y_min_m=y_min_m,
+            y_max_m=y_max_m,
+            z_min_m=z_min_m,
+            z_max_m=z_max_m,
+            min_area_px=min_area_px,
+            red_min_area_px=red_min_area_px,
+            green_min_area_px=green_min_area_px,
+            blue_min_area_px=blue_min_area_px,
+            min_extent_m=min_extent_m,
+            max_extent_m=max_extent_m,
+        )
+        if reasons:
+            rejected_candidates.append(
+                RejectedDuplicateCubeCandidate(candidate=candidate, rejection_reasons=reasons)
+            )
+        else:
+            valid_candidates.append(candidate)
+    return valid_candidates, rejected_candidates
+
+
+def _print_rejected_duplicate_cube_candidates(rejected: list[RejectedDuplicateCubeCandidate]) -> None:
+    for rejected_candidate in rejected:
+        candidate = rejected_candidate.candidate
+        for reason in rejected_candidate.rejection_reasons:
+            print(f"rejected {candidate.cube_color} cube candidate #{candidate.instance_index}: {reason}")
+
+
+def _xy_distance_m(left: DuplicateCubeCandidate, right: DuplicateCubeCandidate) -> float:
+    return float(np.linalg.norm(left.center_robot[:2] - right.center_robot[:2]))
+
+
+def _best_merge_yaw_source(candidates: list[DuplicateCubeCandidate]) -> DuplicateCubeCandidate:
+    return min(candidates, key=lambda candidate: (-int(candidate.area_px), float(candidate.score), int(candidate.instance_index)))
+
+
+def _build_physical_cube_candidate(
+    cluster_index: int,
+    component: list[DuplicateCubeCandidate],
+    T_cam_robot: np.ndarray | None,
+) -> DuplicateCubeCandidate:
+    if not component:
+        raise ValueError("physical cube cluster cannot be empty.")
+
+    yaw_source = _best_merge_yaw_source(component)
+    weights = np.array([max(1, int(candidate.area_px)) for candidate in component], dtype=np.float64)
+    centers = np.vstack([candidate.center_robot for candidate in component])
+    center_robot = np.average(centers, axis=0, weights=weights)
+    yaw_rad = float(yaw_source.yaw_rad)
+
+    T_robot_cube = np.eye(4, dtype=np.float64)
+    T_robot_cube[:3, :3] = _top_down_rotation(yaw_rad)
+    T_robot_cube[:3, 3] = center_robot
+    if T_cam_robot is not None:
+        T_cam_cube = T_cam_robot @ T_robot_cube
+    else:
+        T_cam_cube = yaw_source.T_cam_cube.copy()
+
+    total_area = int(sum(int(candidate.area_px) for candidate in component))
+    weighted_score = float(np.average([candidate.score for candidate in component], weights=weights))
+    member_indices = tuple(int(candidate.instance_index) for candidate in component)
+    return DuplicateCubeCandidate(
+        cube_prompt=yaw_source.cube_prompt,
+        cube_color=yaw_source.cube_color,
+        instance_index=int(cluster_index),
+        component_label=int(yaw_source.component_label),
+        area_px=total_area,
+        score=weighted_score,
+        bbox_diag_m=float(max(candidate.bbox_diag_m for candidate in component)),
+        max_extent_m=float(max(candidate.max_extent_m for candidate in component)),
+        yaw_rad=yaw_rad,
+        T_robot_cube=T_robot_cube,
+        T_cam_cube=T_cam_cube,
+        center_robot=center_robot,
+        member_candidate_indices=member_indices,
+    )
+
+
+def merge_duplicate_cube_candidates(
+    candidates: list[DuplicateCubeCandidate],
+    merge_distance_m: float,
+    T_cam_robot: np.ndarray | None = None,
+) -> tuple[list[DuplicateCubeCandidate], list[MergedDuplicateCubeCandidates]]:
+    if float(merge_distance_m) <= 0.0:
+        raise ValueError("merge_distance_m must be positive.")
+
+    remaining = set(range(len(candidates)))
+    physical_candidates: list[DuplicateCubeCandidate] = []
+    cluster_records: list[MergedDuplicateCubeCandidates] = []
+    while remaining:
+        seed_index = min(remaining)
+        remaining.remove(seed_index)
+        stack = [seed_index]
+        component_indices: set[int] = set()
+
+        while stack:
+            current_index = stack.pop()
+            component_indices.add(current_index)
+            current = candidates[current_index]
+            neighbors = [
+                other_index
+                for other_index in list(remaining)
+                if current.cube_color == candidates[other_index].cube_color
+                and _xy_distance_m(current, candidates[other_index]) < float(merge_distance_m)
+            ]
+            for other_index in neighbors:
+                remaining.remove(other_index)
+                stack.append(other_index)
+
+        component = [candidates[index] for index in sorted(component_indices)]
+        physical = _build_physical_cube_candidate(
+            cluster_index=len(physical_candidates) + 1,
+            component=component,
+            T_cam_robot=T_cam_robot,
+        )
+        physical_candidates.append(physical)
+        cluster_records.append(
+            MergedDuplicateCubeCandidates(
+                physical_candidate=physical,
+                merged_candidates=component,
+                merge_distance_m=float(merge_distance_m),
+            )
+        )
+
+    physical_candidates.sort(key=lambda candidate: int(candidate.instance_index))
+    return physical_candidates, cluster_records
+
+
+def _print_merged_duplicate_cube_candidates(cluster_records: list[MergedDuplicateCubeCandidates]) -> None:
+    for record in cluster_records:
+        physical = record.physical_candidate
+        color = physical.cube_color
+        candidate_ids = "/".join(f"#{candidate.instance_index}" for candidate in record.merged_candidates)
+        print(
+            f"cluster #{physical.instance_index}: members {candidate_ids},"
+            f" merged {color} center={_center_xyz_mm(physical.center_robot)} mm,"
+            f" total area={physical.area_px}"
+        )
+        print(
+            f"merged physical candidate #{physical.instance_index}:"
+            f" yaw_source_member=#{_best_merge_yaw_source(record.merged_candidates).instance_index}"
+            f" representative_yaw_rad={physical.yaw_rad:.4f}"
+            f" weighted_score={physical.score:.4f}"
+        )
+
+
+def _assignment_without_threshold(
+    cube_centers_m: np.ndarray,
+    tag_centers_m: np.ndarray,
+) -> tuple[list[int], np.ndarray, list[float], float]:
+    cube_centers = np.asarray(cube_centers_m, dtype=np.float64)
+    tag_centers = np.asarray(tag_centers_m, dtype=np.float64)
+    if cube_centers.ndim != 2 or tag_centers.ndim != 2 or cube_centers.shape[1] < 2 or tag_centers.shape[1] < 2:
+        raise ValueError("cube_centers_m and tag_centers_m must be Nx2 or Nx3 arrays.")
+    if cube_centers.shape[0] != tag_centers.shape[0]:
+        raise ValueError(
+            f"assignment requires equal counts, got {cube_centers.shape[0]} cubes and {tag_centers.shape[0]} tags."
+        )
+    if cube_centers.shape[0] == 0:
+        raise ValueError("assignment requires at least one cube and one tag.")
+
+    diff = cube_centers[:, None, :2] - tag_centers[None, :, :2]
+    distance_matrix = np.linalg.norm(diff, axis=2)
+
+    best_perm: tuple[int, ...] | None = None
+    best_total = math.inf
+    for perm in itertools.permutations(range(tag_centers.shape[0])):
+        total = float(sum(distance_matrix[cube_index, tag_index] for cube_index, tag_index in enumerate(perm)))
+        if total < best_total:
+            best_total = total
+            best_perm = tuple(int(item) for item in perm)
+
+    if best_perm is None:
+        raise ValueError("assignment failed to produce a permutation.")
+    pair_distances = [float(distance_matrix[cube_index, tag_index]) for cube_index, tag_index in enumerate(best_perm)]
+    return list(best_perm), distance_matrix, pair_distances, best_total
+
+
+def solve_nearest_xy_assignment(
+    cube_centers_m: np.ndarray,
+    tag_centers_m: np.ndarray,
+    max_distance_m: float,
+) -> tuple[list[int], np.ndarray, list[float]]:
+    if float(max_distance_m) <= 0.0:
+        raise ValueError("max_distance_m must be positive.")
+
+    best_perm, distance_matrix, pair_distances, _best_total = _assignment_without_threshold(
+        cube_centers_m=cube_centers_m,
+        tag_centers_m=tag_centers_m,
+    )
+    too_far = [distance for distance in pair_distances if distance > float(max_distance_m)]
+    if too_far:
+        distances_mm = ", ".join(f"{distance * 1000.0:.1f}" for distance in pair_distances)
+        print("Assignment distance matrix exceeded the threshold (mm):")
+        print(np.array2string(distance_matrix * 1000.0, precision=1, suppress_small=False))
+        print(f"Best assignment permutation: {best_perm}")
+        raise ValueError(
+            f"assignment pair distance exceeds --max_assignment_distance_m={float(max_distance_m):.3f} m; "
+            f"pair distances mm=[{distances_mm}]."
+        )
+
+    return best_perm, distance_matrix, pair_distances
+
+
+def _selection_tie_break_score(cubes: list[DuplicateCubeCandidate]) -> float:
+    return float(sum(candidate.score for candidate in cubes))
+
+
+def _selection_objective(total_distance_m: float, cubes: list[DuplicateCubeCandidate]) -> float:
+    return float(total_distance_m) + 0.001 * _selection_tie_break_score(cubes)
+
+
+def _selection_better(
+    candidate: DuplicateAssignmentSelection,
+    incumbent: DuplicateAssignmentSelection | None,
+) -> bool:
+    if incumbent is None:
+        return True
+    if candidate.objective < incumbent.objective - 1e-12:
+        return True
+    if math.isclose(candidate.objective, incumbent.objective, rel_tol=0.0, abs_tol=1e-12):
+        candidate_area = sum(cube.area_px for cube in candidate.selected_cubes)
+        incumbent_area = sum(cube.area_px for cube in incumbent.selected_cubes)
+        if candidate_area > incumbent_area:
+            return True
+    return False
+
+
+def select_duplicate_assignment_subset(
+    cube_candidates: list[DuplicateCubeCandidate],
+    tag_candidates: list[DuplicateTagCandidate],
+    count: int,
+    max_distance_m: float,
+) -> DuplicateAssignmentSelection:
+    if int(count) <= 0:
+        raise ValueError("count must be positive.")
+    if len(cube_candidates) < int(count):
+        raise ValueError(f"need {count} valid cube candidates, found {len(cube_candidates)}.")
+    if len(tag_candidates) < int(count):
+        raise ValueError(f"need {count} tag candidates, found {len(tag_candidates)}.")
+    if float(max_distance_m) <= 0.0:
+        raise ValueError("max_distance_m must be positive.")
+
+    best_valid: DuplicateAssignmentSelection | None = None
+    best_failed: DuplicateAssignmentSelection | None = None
+
+    for cube_subset in itertools.combinations(cube_candidates, int(count)):
+        tag_subsets = itertools.combinations(tag_candidates, int(count))
+        for tag_subset in tag_subsets:
+            cube_centers = np.vstack([candidate.center_robot for candidate in cube_subset])
+            tag_centers = np.vstack([candidate.center_robot for candidate in tag_subset])
+            tag_permutation, distance_matrix, pair_distances, total_distance_m = _assignment_without_threshold(
+                cube_centers_m=cube_centers,
+                tag_centers_m=tag_centers,
+            )
+            selection = DuplicateAssignmentSelection(
+                selected_cubes=list(cube_subset),
+                selected_tags=list(tag_subset),
+                tag_permutation=tag_permutation,
+                distance_matrix=distance_matrix,
+                pair_distances=pair_distances,
+                total_distance_m=float(total_distance_m),
+                objective=_selection_objective(total_distance_m, list(cube_subset)),
+            )
+            if any(distance > float(max_distance_m) for distance in pair_distances):
+                if _selection_better(selection, best_failed):
+                    best_failed = selection
+                continue
+            if _selection_better(selection, best_valid):
+                best_valid = selection
+
+    if best_valid is not None:
+        return best_valid
+
+    if best_failed is not None:
+        cube_ids = ", ".join(f"#{candidate.instance_index}" for candidate in best_failed.selected_cubes)
+        tag_ids = ", ".join(f"#{candidate.instance_index}" for candidate in best_failed.selected_tags)
+        distances_mm = ", ".join(f"{distance * 1000.0:.1f}" for distance in best_failed.pair_distances)
+        print("No duplicate-aware candidate set satisfies the max assignment distance.")
+        print(f"Best failed cube candidates: {cube_ids}")
+        print(f"Best failed tag candidates: {tag_ids}")
+        print(f"Best failed pair distances mm: [{distances_mm}]")
+        print("Best failed final distance matrix (mm):")
+        print(np.array2string(best_failed.distance_matrix * 1000.0, precision=1, suppress_small=False))
+    raise ValueError(
+        f"no valid duplicate-aware assignment satisfies --max_assignment_distance_m={float(max_distance_m):.3f} m."
+    )
+
+
+def select_preset_assignment_subset(
+    cube_candidates: list[DuplicateCubeCandidate],
+    slots: list[PresetSlot],
+    count: int,
+) -> PresetAssignmentSelection:
+    if int(count) <= 0:
+        raise ValueError("count must be positive.")
+    if len(cube_candidates) < int(count):
+        raise ValueError(f"need {count} valid cube candidates, found {len(cube_candidates)}.")
+    if len(slots) != int(count):
+        raise ValueError(f"preset assignment requires exactly {count} slots, found {len(slots)}.")
+
+    best_selection: PresetAssignmentSelection | None = None
+    selected_slots = list(slots)
+    slot_centers = np.vstack([slot.center_robot for slot in selected_slots])
+    for cube_subset in itertools.combinations(cube_candidates, int(count)):
+        cube_centers = np.vstack([candidate.center_robot for candidate in cube_subset])
+        slot_permutation, distance_matrix, pair_distances, total_distance_m = _assignment_without_threshold(
+            cube_centers_m=cube_centers,
+            tag_centers_m=slot_centers,
+        )
+        selection = PresetAssignmentSelection(
+            selected_cubes=list(cube_subset),
+            selected_slots=selected_slots,
+            slot_permutation=slot_permutation,
+            distance_matrix=distance_matrix,
+            pair_distances=pair_distances,
+            total_distance_m=float(total_distance_m),
+            objective=_selection_objective(total_distance_m, list(cube_subset)),
+        )
+        if _selection_better(
+            DuplicateAssignmentSelection(
+                selected_cubes=selection.selected_cubes,
+                selected_tags=[],
+                tag_permutation=selection.slot_permutation,
+                distance_matrix=selection.distance_matrix,
+                pair_distances=selection.pair_distances,
+                total_distance_m=selection.total_distance_m,
+                objective=selection.objective,
+            ),
+            DuplicateAssignmentSelection(
+                selected_cubes=best_selection.selected_cubes,
+                selected_tags=[],
+                tag_permutation=best_selection.slot_permutation,
+                distance_matrix=best_selection.distance_matrix,
+                pair_distances=best_selection.pair_distances,
+                total_distance_m=best_selection.total_distance_m,
+                objective=best_selection.objective,
+            )
+            if best_selection is not None
+            else None,
+        ):
+            best_selection = selection
+
+    if best_selection is None:
+        raise ValueError("preset assignment failed to produce a selection.")
+    return best_selection
+
+
+def _print_duplicate_cube_candidates(group: DuplicateCubeTagGroup, candidates: list[DuplicateCubeCandidate]) -> None:
+    print(f"Detected cube candidates for {group.cube_prompt!r} (need {group.count}): {len(candidates)}")
+    for candidate in candidates:
+        print(
+            f"  cube #{candidate.instance_index}:"
+            f" label={candidate.component_label}"
+            f" color={candidate.cube_color}"
+            f" center={_center_xyz_mm(candidate.center_robot)} mm"
+            f" area_px={candidate.area_px}"
+            f" score={candidate.score:.4f}"
+            f" bbox_diag_m={candidate.bbox_diag_m:.4f}"
+            f" max_extent_m={candidate.max_extent_m:.4f}"
+            f" yaw={math.degrees(candidate.yaw_rad):.1f} deg"
+        )
+
+
+def _print_duplicate_tag_candidates(group: DuplicateCubeTagGroup, candidates: list[DuplicateTagCandidate]) -> None:
+    print(f"Detected tag candidates for tag {group.tag_id} (need {group.count}): {len(candidates)}")
+    for candidate in candidates:
+        print(
+            f"  tag #{candidate.instance_index}:"
+            f" detection_index={candidate.detection_index}"
+            f" center={_center_xyz_mm(candidate.center_robot)} mm"
+            f" decision_margin={candidate.decision_margin:.2f}"
+            f" hamming={candidate.hamming}"
+        )
+
+
+def _print_duplicate_selected_candidates(
+    group: DuplicateCubeTagGroup,
+    cubes: list[DuplicateCubeCandidate],
+    tags: list[DuplicateTagCandidate],
+) -> None:
+    cube_ids = ", ".join(f"#{candidate.instance_index}" for candidate in cubes)
+    tag_ids = ", ".join(f"#{candidate.instance_index}" for candidate in tags)
+    print(f"Selected cube candidates for {group.cube_prompt!r}: {cube_ids}")
+    print(f"Selected tag candidates for tag {group.tag_id}: {tag_ids}")
+
+
+def _print_duplicate_distance_matrix(
+    group: DuplicateCubeTagGroup,
+    cubes: list[DuplicateCubeCandidate],
+    tags: list[DuplicateTagCandidate],
+    distance_matrix: np.ndarray,
+) -> None:
+    print(f"Distance matrix for group {group.cube_prompt!r} -> tag {group.tag_id} (mm):")
+    header = "cube/tag | " + " | ".join(f"tag #{tag.instance_index}" for tag in tags)
+    print(header)
+    print("-" * len(header))
+    for cube_index, cube in enumerate(cubes):
+        row = " | ".join(f"{distance_matrix[cube_index, tag_index] * 1000.0:.1f}" for tag_index in range(len(tags)))
+        print(f"cube #{cube.instance_index} | {row}")
+
+
+def _print_preset_distance_matrix(
+    group: PresetCubeGroup,
+    cubes: list[DuplicateCubeCandidate],
+    slots: list[PresetSlot],
+    distance_matrix: np.ndarray,
+) -> None:
+    print(f"Distance matrix for preset group {group.cube_prompt!r} (mm):")
+    header = "cube/slot | " + " | ".join(f"slot {slot.slot_id}" for slot in slots)
+    print(header)
+    print("-" * len(header))
+    for cube_index, cube in enumerate(cubes):
+        row = " | ".join(f"{distance_matrix[cube_index, slot_index] * 1000.0:.1f}" for slot_index in range(len(slots)))
+        print(f"cube #{cube.instance_index} | {row}")
+
+
+def _print_duplicate_assignment_table(assignments: list[DuplicateAssignedPair]) -> None:
+    print("\nDuplicate-aware assignment table:")
+    print("group | cube instance | cube x/y/z mm | tag instance | tag id | tag x/y/z mm | distance mm")
+    print("----- | ------------- | ------------- | ------------ | ------ | ------------ | -----------")
+    for assignment in assignments:
+        group_label = f"{assignment.cube_prompt} -> tag {assignment.tag_id}"
+        print(
+            f"{group_label} | "
+            f"#{assignment.cube.instance_index} | "
+            f"{_center_xyz_mm(assignment.cube.center_robot)} | "
+            f"#{assignment.tag.instance_index} | "
+            f"{assignment.tag_id} | "
+            f"{_center_xyz_mm(assignment.tag.center_robot)} | "
+            f"{assignment.distance_m * 1000.0:.1f}"
+        )
+
+
+def _print_duplicate_execution_order(assignments: list[DuplicateAssignedPair]) -> None:
+    print("\nFinal duplicate-aware execution order:")
+    for assignment in assignments:
+        print(
+            f"  Pair {assignment.execution_index}/{len(assignments)}:"
+            f" {assignment.cube_prompt} cube #{assignment.cube.instance_index}"
+            f" -> tag {assignment.tag_id} #{assignment.tag.instance_index}"
+            f" distance={assignment.distance_m * 1000.0:.1f} mm"
+        )
+
+
+def _print_preset_assignment_table(assignments: list[PresetAssignedPair]) -> None:
+    print("\nPreset layout assignment table:")
+    print("group | cube instance | cube x/y/z mm | slot id | slot x/y/z mm | distance mm")
+    print("----- | ------------- | ------------- | ------- | ------------ | -----------")
+    for assignment in assignments:
+        print(
+            f"{assignment.cube_prompt} | "
+            f"#{assignment.cube.instance_index} | "
+            f"{_center_xyz_mm(assignment.cube.center_robot)} | "
+            f"{assignment.slot.slot_id} | "
+            f"{_center_xyz_mm(assignment.slot.center_robot)} | "
+            f"{assignment.distance_m * 1000.0:.1f}"
+        )
+
+
+def _print_preset_execution_order(assignments: list[PresetAssignedPair]) -> None:
+    print("\nFinal preset layout execution order:")
+    for assignment in assignments:
+        print(
+            f"  Pair {assignment.execution_index}/{len(assignments)}:"
+            f" {assignment.cube_prompt} cube #{assignment.cube.instance_index}"
+            f" -> slot {assignment.slot.slot_id}"
+            f" distance={assignment.distance_m * 1000.0:.1f} mm"
+        )
+
+
+def _matrix_to_json(matrix: np.ndarray) -> list[list[float]]:
+    array = np.asarray(matrix, dtype=np.float64)
+    if array.shape != (4, 4):
+        raise ValueError(f"expected a 4x4 transform matrix, got shape {array.shape}.")
+    if not np.isfinite(array).all():
+        raise ValueError("transform matrix contains non-finite values.")
+    return [[float(value) for value in row] for row in array]
+
+
+def _matrix_from_json(value: Any, name: str) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    if array.shape != (4, 4):
+        raise ValueError(f"{name} must be a 4x4 matrix, got shape {array.shape}.")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name} contains non-finite values.")
+    return array
+
+
+def duplicate_pose_plan_to_json_data(plan: DuplicatePosePlan) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "execution_index": int(plan.execution_index),
+        "cube_prompt": str(plan.cube_prompt),
+        "target_tag_id": int(plan.target_tag_id),
+        "cube_instance_index": int(plan.cube_instance_index),
+        "tag_instance_index": int(plan.tag_instance_index),
+        "t_robot_cube": _matrix_to_json(plan.T_robot_cube),
+        "t_robot_place": _matrix_to_json(plan.T_robot_place),
+    }
+    if plan.target_source != "apriltag" or plan.slot_id is not None or plan.preset_slot is not None:
+        data["target_source"] = str(plan.target_source)
+    if plan.slot_id is not None:
+        data["slot_id"] = int(plan.slot_id)
+    if plan.preset_slot is not None:
+        data["preset_slot"] = dict(plan.preset_slot)
+    if plan.target_source == "preset_slot":
+        data["preset_use_slot_yaw"] = bool(plan.preset_use_slot_yaw)
+    return data
+
+
+def duplicate_pose_plan_from_json_data(data: dict[str, Any]) -> DuplicatePosePlan:
+    required = [
+        "execution_index",
+        "cube_prompt",
+        "target_tag_id",
+        "cube_instance_index",
+        "tag_instance_index",
+        "t_robot_cube",
+        "t_robot_place",
+    ]
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ValueError("pose plan JSON is missing required keys: " + ", ".join(missing))
+    cube_prompt = str(data["cube_prompt"]).strip()
+    if not cube_prompt:
+        raise ValueError("pose plan JSON cube_prompt must be nonempty.")
+    target_source = str(data.get("target_source", "apriltag")).strip() or "apriltag"
+    if target_source not in {"apriltag", "preset_slot"}:
+        raise ValueError(f"pose plan JSON target_source is unsupported: {target_source!r}.")
+    slot_id = data.get("slot_id")
+    preset_slot = data.get("preset_slot")
+    preset_use_slot_yaw = bool(data.get("preset_use_slot_yaw", False))
+    if target_source == "preset_slot":
+        if slot_id is None:
+            raise ValueError("preset_slot pose plan JSON requires slot_id.")
+        if not isinstance(preset_slot, dict):
+            raise ValueError("preset_slot pose plan JSON requires preset_slot object.")
+        _preset_slot_from_json_data(preset_slot, 1)
+    return DuplicatePosePlan(
+        execution_index=int(data["execution_index"]),
+        cube_prompt=cube_prompt,
+        target_tag_id=int(data["target_tag_id"]),
+        cube_instance_index=int(data["cube_instance_index"]),
+        tag_instance_index=int(data["tag_instance_index"]),
+        T_robot_cube=_matrix_from_json(data["t_robot_cube"], "t_robot_cube"),
+        T_robot_place=_matrix_from_json(data["t_robot_place"], "t_robot_place"),
+        target_source=target_source,
+        slot_id=int(slot_id) if slot_id is not None else None,
+        preset_slot=dict(preset_slot) if isinstance(preset_slot, dict) else None,
+        preset_use_slot_yaw=preset_use_slot_yaw,
+    )
+
+
+def _write_duplicate_pose_plan_json(plan: DuplicatePosePlan, path: Path) -> Path:
+    output_path = path.expanduser()
+    if not output_path.is_absolute():
+        output_path = REPO_ROOT / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(duplicate_pose_plan_to_json_data(plan), handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError as exc:
+            print(f"Warning: failed to fsync pose-plan JSON {output_path}: {exc}")
+    return output_path
+
+
+def _load_duplicate_pose_plan_json(path: str | Path) -> DuplicatePosePlan:
+    input_path = Path(path).expanduser()
+    if not input_path.is_absolute():
+        input_path = REPO_ROOT / input_path
+    with input_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("pose plan JSON root must be an object.")
+    return duplicate_pose_plan_from_json_data(data)
+
+
+def _duplicate_pose_plan_from_assignment(assignment: DuplicateAssignedPair) -> DuplicatePosePlan:
+    return DuplicatePosePlan(
+        execution_index=assignment.execution_index,
+        cube_prompt=assignment.cube_prompt,
+        target_tag_id=assignment.tag_id,
+        cube_instance_index=assignment.cube.instance_index,
+        tag_instance_index=assignment.tag.instance_index,
+        T_robot_cube=assignment.cube.T_robot_cube,
+        T_robot_place=assignment.T_robot_place,
+    )
+
+
+def _duplicate_pose_plan_from_preset_assignment(assignment: PresetAssignedPair) -> DuplicatePosePlan:
+    return DuplicatePosePlan(
+        execution_index=assignment.execution_index,
+        cube_prompt=assignment.cube_prompt,
+        target_tag_id=int(assignment.slot.slot_id),
+        cube_instance_index=assignment.cube.instance_index,
+        tag_instance_index=int(assignment.slot.slot_id),
+        T_robot_cube=assignment.cube.T_robot_cube,
+        T_robot_place=assignment.T_robot_place,
+        target_source="preset_slot",
+        slot_id=int(assignment.slot.slot_id),
+        preset_slot=assignment.slot.to_json_data(),
+        preset_use_slot_yaw=bool(assignment.preset_use_slot_yaw),
+    )
+
+
+def _slugify_for_filename(value: str) -> str:
+    cleaned = []
+    for char in value.strip().lower():
+        if char.isalnum():
+            cleaned.append(char)
+        elif char in {" ", "-", "_"}:
+            cleaned.append("_")
+    slug = "".join(cleaned).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "item"
+
+
+def _write_duplicate_pose_plans(assignments: list[DuplicateAssignedPair]) -> dict[int, Path]:
+    plan_paths: dict[int, Path] = {}
+    base_dir = REPO_ROOT / DUPLICATE_POSE_PLAN_DIR
+    for assignment in assignments:
+        slug = _slugify_for_filename(assignment.cube_prompt)
+        path = base_dir / f"pair_{assignment.execution_index:03d}_{slug}_to_tag_{assignment.tag_id}.json"
+        plan_path = _write_duplicate_pose_plan_json(_duplicate_pose_plan_from_assignment(assignment), path)
+        plan_paths[assignment.execution_index] = plan_path
+        print(f"Pose-plan JSON for pair {assignment.execution_index}: {plan_path}")
+    return plan_paths
+
+
+def _write_preset_pose_plans(assignments: list[PresetAssignedPair]) -> dict[int, Path]:
+    plan_paths: dict[int, Path] = {}
+    base_dir = REPO_ROOT / PRESET_POSE_PLAN_DIR
+    for assignment in assignments:
+        slug = _slugify_for_filename(assignment.cube_prompt)
+        path = base_dir / f"pair_{assignment.execution_index:03d}_{slug}_to_slot_{assignment.slot.slot_id}.json"
+        plan_path = _write_duplicate_pose_plan_json(_duplicate_pose_plan_from_preset_assignment(assignment), path)
+        plan_paths[assignment.execution_index] = plan_path
+        print(f"Preset pose-plan JSON for pair {assignment.execution_index}: {plan_path}")
+    return plan_paths
+
+
+def _candidate_cube_report(candidate: DuplicateCubeCandidate) -> dict[str, Any]:
+    member_indices = tuple(candidate.member_candidate_indices) or (int(candidate.instance_index),)
+    return {
+        "instance_index": int(candidate.instance_index),
+        "component_label": int(candidate.component_label),
+        "cube_color": candidate.cube_color,
+        "center_robot_m": [float(value) for value in candidate.center_robot],
+        "merged_center_robot_m": [float(value) for value in candidate.center_robot],
+        "area_px": int(candidate.area_px),
+        "merged_area_px": int(candidate.area_px),
+        "score": float(candidate.score),
+        "bbox_diag_m": float(candidate.bbox_diag_m),
+        "max_extent_m": float(candidate.max_extent_m),
+        "yaw_rad": float(candidate.yaw_rad),
+        "representative_yaw_rad": float(candidate.yaw_rad),
+        "member_candidate_indices": [int(index) for index in member_indices],
+    }
+
+
+def _rejected_candidate_cube_report(rejected: RejectedDuplicateCubeCandidate) -> dict[str, Any]:
+    report = _candidate_cube_report(rejected.candidate)
+    report["rejection_reason"] = list(rejected.rejection_reasons)
+    report["rejection_reasons"] = list(rejected.rejection_reasons)
+    return report
+
+
+def _merged_candidate_cube_report(merged: MergedDuplicateCubeCandidates) -> dict[str, Any]:
+    return {
+        "physical_candidate": _candidate_cube_report(merged.physical_candidate),
+        "merged_candidates": [_candidate_cube_report(candidate) for candidate in merged.merged_candidates],
+        "merge_distance_m": float(merged.merge_distance_m),
+        "merge_reason": "xy centers closer than candidate_merge_distance_m",
+    }
+
+
+def _candidate_tag_report(candidate: DuplicateTagCandidate) -> dict[str, Any]:
+    return {
+        "instance_index": int(candidate.instance_index),
+        "detection_index": int(candidate.detection_index),
+        "tag_id": int(candidate.tag_id),
+        "center_robot_m": [float(value) for value in candidate.center_robot],
+        "decision_margin": float(candidate.decision_margin),
+        "hamming": int(candidate.hamming),
+    }
+
+
+def _assignment_report_row(assignment: DuplicateAssignedPair, plan_paths: dict[int, Path] | None) -> dict[str, Any]:
+    plan_path = None
+    if plan_paths is not None and assignment.execution_index in plan_paths:
+        plan_path = str(plan_paths[assignment.execution_index])
+    return {
+        "execution_index": int(assignment.execution_index),
+        "group_index": int(assignment.group_index),
+        "within_group_index": int(assignment.within_group_index),
+        "cube_prompt": assignment.cube_prompt,
+        "tag_id": int(assignment.tag_id),
+        "cube_instance_index": int(assignment.cube.instance_index),
+        "tag_instance_index": int(assignment.tag.instance_index),
+        "cube_center_robot_m": [float(value) for value in assignment.cube.center_robot],
+        "tag_center_robot_m": [float(value) for value in assignment.tag.center_robot],
+        "distance_m": float(assignment.distance_m),
+        "pose_plan_path": plan_path,
+    }
+
+
+def _preset_assignment_report_row(assignment: PresetAssignedPair, plan_paths: dict[int, Path] | None) -> dict[str, Any]:
+    plan_path = None
+    if plan_paths is not None and assignment.execution_index in plan_paths:
+        plan_path = str(plan_paths[assignment.execution_index])
+    return {
+        "execution_index": int(assignment.execution_index),
+        "group_index": int(assignment.group_index),
+        "within_group_index": int(assignment.within_group_index),
+        "cube_prompt": assignment.cube_prompt,
+        "cube_instance_index": int(assignment.cube.instance_index),
+        "slot_id": int(assignment.slot.slot_id),
+        "cube_center_robot_m": [float(value) for value in assignment.cube.center_robot],
+        "slot_center_robot_m": [float(value) for value in assignment.slot.center_robot],
+        "distance_m": float(assignment.distance_m),
+        "pose_plan_path": plan_path,
+        "preset_use_slot_yaw": bool(assignment.preset_use_slot_yaw),
+    }
+
+
+def _save_duplicate_assignment_report(
+    groups: list[dict[str, Any]],
+    assignments: list[DuplicateAssignedPair],
+    preview_path: Path | None,
+    plan_paths: dict[int, Path] | None = None,
+    execution_confirmed: bool = False,
+) -> Path:
+    report_path = REPO_ROOT / DUPLICATE_ASSIGNMENT_REPORT_PATH
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "created_unix_s": time.time(),
+        "assignment_metric": "nearest",
+        "assignment_space": "xy",
+        "preview_path": str(preview_path) if preview_path is not None else None,
+        "execution_confirmed": bool(execution_confirmed),
+        "groups": groups,
+        "execution_order": [_assignment_report_row(assignment, plan_paths) for assignment in assignments],
+    }
+    with report_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+        handle.write("\n")
+    print(f"Saved duplicate-aware assignment report: {report_path}")
+    return report_path
+
+
+def _save_preset_assignment_report(
+    layout: PresetLayout,
+    groups: list[dict[str, Any]],
+    assignments: list[PresetAssignedPair],
+    preview_path: Path | None,
+    plan_paths: dict[int, Path] | None = None,
+    execution_confirmed: bool = False,
+) -> Path:
+    report_path = REPO_ROOT / PRESET_LAYOUT_ASSIGNMENT_REPORT_PATH
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "created_unix_s": time.time(),
+        "assignment_metric": "nearest",
+        "assignment_space": "xy",
+        "layout": {
+            "name": layout.name,
+            "frame": layout.frame,
+            "slots": [slot.to_json_data() for slot in layout.slots.values()],
+        },
+        "preview_path": str(preview_path) if preview_path is not None else None,
+        "execution_confirmed": bool(execution_confirmed),
+        "groups": groups,
+        "execution_order": [_preset_assignment_report_row(assignment, plan_paths) for assignment in assignments],
+    }
+    with report_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+        handle.write("\n")
+    print(f"Saved preset layout assignment report: {report_path}")
+    return report_path
+
+
+def _draw_duplicate_assignment_preview(
+    image: np.ndarray,
+    camera_intrinsic: np.ndarray,
+    assignments: list[DuplicateAssignedPair],
+    cube_size_m: float,
+    target_tag_size_m: float,
+    draw_pose_axes_fn: Any,
+) -> np.ndarray:
+    display = _bgr_from_image(image)
+    colors = [
+        (0, 255, 255),
+        (255, 180, 0),
+        (0, 180, 255),
+        (180, 255, 0),
+        (255, 0, 255),
+        (0, 255, 120),
+    ]
+    for assignment in assignments:
+        color = colors[(assignment.execution_index - 1) % len(colors)]
+        draw_pose_axes_fn(display, camera_intrinsic, assignment.cube.T_cam_cube, size=float(cube_size_m) * 1.5)
+        draw_pose_axes_fn(display, camera_intrinsic, assignment.tag.T_cam_tag, size=float(target_tag_size_m) * 0.75)
+        draw_pose_axes_fn(display, camera_intrinsic, assignment.T_cam_place, size=float(cube_size_m) * 1.5)
+        cube_label = f"{assignment.execution_index}: {assignment.cube_prompt} #{assignment.cube.instance_index}"
+        tag_label = f"{assignment.execution_index}: tag {assignment.tag_id} #{assignment.tag.instance_index}"
+        _draw_label(display, camera_intrinsic, assignment.cube.T_cam_cube, cube_label, color)
+        _draw_label(display, camera_intrinsic, assignment.tag.T_cam_tag, tag_label, (255, 255, 0))
+        _draw_label(display, camera_intrinsic, assignment.T_cam_place, f"place {assignment.execution_index}", (255, 0, 255))
+
+        cube_origin = _project_origin(camera_intrinsic, assignment.cube.T_cam_cube)
+        tag_origin = _project_origin(camera_intrinsic, assignment.tag.T_cam_tag)
+        if cube_origin is not None and tag_origin is not None:
+            cv2.line(display, cube_origin, tag_origin, color, 2, cv2.LINE_AA)
+    return display
+
+
+def _draw_preset_assignment_preview(
+    image: np.ndarray,
+    camera_intrinsic: np.ndarray,
+    assignments: list[PresetAssignedPair],
+    cube_size_m: float,
+    draw_pose_axes_fn: Any,
+) -> np.ndarray:
+    display = _bgr_from_image(image)
+    colors = [
+        (0, 255, 255),
+        (255, 180, 0),
+        (0, 180, 255),
+        (180, 255, 0),
+        (255, 0, 255),
+        (0, 255, 120),
+    ]
+    for assignment in assignments:
+        color = colors[(assignment.execution_index - 1) % len(colors)]
+        draw_pose_axes_fn(display, camera_intrinsic, assignment.cube.T_cam_cube, size=float(cube_size_m) * 1.5)
+        draw_pose_axes_fn(display, camera_intrinsic, assignment.T_cam_place, size=float(cube_size_m) * 1.5)
+        _draw_label(display, camera_intrinsic, assignment.cube.T_cam_cube, f"{assignment.execution_index}: {assignment.cube_prompt}", color)
+        _draw_label(display, camera_intrinsic, assignment.T_cam_place, f"slot {assignment.slot.slot_id}", (255, 0, 255))
+        cube_origin = _project_origin(camera_intrinsic, assignment.cube.T_cam_cube)
+        place_origin = _project_origin(camera_intrinsic, assignment.T_cam_place)
+        if cube_origin is not None and place_origin is not None:
+            cv2.line(display, cube_origin, place_origin, color, 2, cv2.LINE_AA)
+    return display
 
 
 def _checkpoint8_validate_multi_plan_distinct(entries: list[Checkpoint8MultiPlanEntry], min_distance_m: float = 0.005) -> None:
@@ -2313,6 +4290,554 @@ def _checkpoint8_multi_preflight(
     return confirmed, entries
 
 
+def _build_duplicate_assignments_for_group(
+    group_index: int,
+    group: DuplicateCubeTagGroup,
+    cube_candidates: list[DuplicateCubeCandidate],
+    tag_candidates: list[DuplicateTagCandidate],
+    max_assignment_distance_m: float,
+    candidate_x_min_m: float,
+    candidate_x_max_m: float,
+    candidate_y_min_m: float,
+    candidate_y_max_m: float,
+    candidate_z_min_m: float,
+    candidate_z_max_m: float,
+    candidate_min_area_px: int,
+    red_candidate_min_area_px: int,
+    green_candidate_min_area_px: int,
+    blue_candidate_min_area_px: int,
+    candidate_min_extent_m: float,
+    candidate_max_extent_m: float,
+    candidate_merge_distance_m: float,
+    candidate_merge_prompts: list[str],
+    next_execution_index: int,
+    T_cam_robot: np.ndarray,
+) -> tuple[list[DuplicateAssignedPair], dict[str, Any]]:
+    _print_duplicate_cube_candidates(group, cube_candidates)
+    _print_duplicate_tag_candidates(group, tag_candidates)
+    valid_cube_candidates, rejected_cube_candidates = filter_duplicate_cube_candidates(
+        candidates=cube_candidates,
+        x_min_m=candidate_x_min_m,
+        x_max_m=candidate_x_max_m,
+        y_min_m=candidate_y_min_m,
+        y_max_m=candidate_y_max_m,
+        z_min_m=candidate_z_min_m,
+        z_max_m=candidate_z_max_m,
+        min_area_px=candidate_min_area_px,
+        red_min_area_px=red_candidate_min_area_px,
+        green_min_area_px=green_candidate_min_area_px,
+        blue_min_area_px=blue_candidate_min_area_px,
+        min_extent_m=candidate_min_extent_m,
+        max_extent_m=candidate_max_extent_m,
+    )
+    _print_rejected_duplicate_cube_candidates(rejected_cube_candidates)
+    physical_cube_candidates, physical_cube_clusters = merge_duplicate_cube_candidates(
+        candidates=valid_cube_candidates,
+        merge_distance_m=candidate_merge_distance_m,
+        T_cam_robot=T_cam_robot,
+    )
+    _print_merged_duplicate_cube_candidates(physical_cube_clusters)
+    merged_cube_candidates = [
+        cluster for cluster in physical_cube_clusters if len(cluster.merged_candidates) > 1
+    ]
+    print(
+        f"Duplicate cube candidate filter for {group.cube_prompt!r}:"
+        f" raw={len(cube_candidates)}"
+        f" rejected={len(rejected_cube_candidates)}"
+        f" valid={len(valid_cube_candidates)}"
+        f" clusters={len(physical_cube_clusters)}"
+        f" merged_clusters={len(merged_cube_candidates)}"
+        f" physical={len(physical_cube_candidates)}"
+    )
+    print(
+        "Candidate filter bounds:"
+        f" x=[{candidate_x_min_m * 1000.0:.0f},{candidate_x_max_m * 1000.0:.0f}]mm"
+        f" y=[{candidate_y_min_m * 1000.0:.0f},{candidate_y_max_m * 1000.0:.0f}]mm"
+        f" z=[{candidate_z_min_m * 1000.0:.0f},{candidate_z_max_m * 1000.0:.0f}]mm"
+        f" min_area_px={int(candidate_min_area_px)}"
+        f" red_min_area_px={int(red_candidate_min_area_px)}"
+        f" green_min_area_px={int(green_candidate_min_area_px)}"
+        f" blue_min_area_px={int(blue_candidate_min_area_px)}"
+        f" extent=[{candidate_min_extent_m * 1000.0:.1f},{candidate_max_extent_m * 1000.0:.1f}]mm"
+        f" merge_distance={candidate_merge_distance_m * 1000.0:.1f}mm"
+    )
+    print(
+        f"Physical cube candidates for {group.cube_prompt!r}: "
+        + (", ".join(f"#{candidate.instance_index}" for candidate in physical_cube_candidates) or "none")
+    )
+    if len(physical_cube_candidates) < group.count:
+        raise RuntimeError(
+            f"Insufficient physical cube candidates for {group.cube_prompt!r}: "
+            f"need {group.count}, found {len(physical_cube_candidates)} "
+            f"(raw={len(cube_candidates)}, rejected={len(rejected_cube_candidates)}, "
+            f"valid={len(valid_cube_candidates)}, clusters={len(physical_cube_clusters)})."
+        )
+    if len(tag_candidates) < group.count:
+        raise RuntimeError(
+            f"Insufficient tag candidates for tag {group.tag_id}: "
+            f"need {group.count}, found {len(tag_candidates)}."
+        )
+
+    selection = select_duplicate_assignment_subset(
+        cube_candidates=physical_cube_candidates,
+        tag_candidates=tag_candidates,
+        count=group.count,
+        max_distance_m=max_assignment_distance_m,
+    )
+    selected_cubes = selection.selected_cubes
+    selected_tags = selection.selected_tags
+    _print_duplicate_selected_candidates(group, selected_cubes, selected_tags)
+    _print_duplicate_distance_matrix(group, selected_cubes, selected_tags, selection.distance_matrix)
+    print(
+        "Final pair distances mm:"
+        f" {[round(distance * 1000.0, 1) for distance in selection.pair_distances]}"
+        f" total={selection.total_distance_m * 1000.0:.1f}"
+        f" objective={selection.objective:.6f}"
+    )
+
+    assignments: list[DuplicateAssignedPair] = []
+    assignment_rows: list[dict[str, Any]] = []
+    for cube_order_index, tag_order_index in enumerate(selection.tag_permutation):
+        cube = selected_cubes[cube_order_index]
+        tag = selected_tags[tag_order_index]
+        T_robot_place = _checkpoint8_target_pose_from_tag(cube.T_robot_cube, tag.T_robot_tag)
+        T_cam_place = T_cam_robot @ T_robot_place
+        execution_index = next_execution_index + len(assignments)
+        assignment = DuplicateAssignedPair(
+            execution_index=execution_index,
+            group_index=group_index,
+            within_group_index=cube_order_index + 1,
+            cube_prompt=group.cube_prompt,
+            tag_id=group.tag_id,
+            cube=cube,
+            tag=tag,
+            distance_m=float(selection.pair_distances[cube_order_index]),
+            T_robot_place=T_robot_place,
+            T_cam_place=T_cam_place,
+        )
+        assignments.append(assignment)
+        assignment_rows.append(
+            {
+                "cube_instance_index": int(cube.instance_index),
+                "tag_instance_index": int(tag.instance_index),
+                "distance_m": float(selection.pair_distances[cube_order_index]),
+            }
+        )
+
+    group_report = {
+        "group_index": int(group_index),
+        "cube_prompt": group.cube_prompt,
+        "tag_id": int(group.tag_id),
+        "count": int(group.count),
+        "filter_parameters": {
+            "candidate_x_min_m": float(candidate_x_min_m),
+            "candidate_x_max_m": float(candidate_x_max_m),
+            "candidate_y_min_m": float(candidate_y_min_m),
+            "candidate_y_max_m": float(candidate_y_max_m),
+            "candidate_z_min_m": float(candidate_z_min_m),
+            "candidate_z_max_m": float(candidate_z_max_m),
+            "candidate_min_area_px": int(candidate_min_area_px),
+            "red_candidate_min_area_px": int(red_candidate_min_area_px),
+            "green_candidate_min_area_px": int(green_candidate_min_area_px),
+            "blue_candidate_min_area_px": int(blue_candidate_min_area_px),
+            "candidate_min_extent_m": float(candidate_min_extent_m),
+            "candidate_max_extent_m": float(candidate_max_extent_m),
+            "candidate_merge_distance_m": float(candidate_merge_distance_m),
+            "candidate_merge_prompts": list(candidate_merge_prompts),
+            "candidate_merge_prompts_ignored": True,
+        },
+        "merge_enabled": True,
+        "raw_cube_candidates": [_candidate_cube_report(candidate) for candidate in cube_candidates],
+        "rejected_cube_candidates": [
+            _rejected_candidate_cube_report(rejected) for rejected in rejected_cube_candidates
+        ],
+        "valid_cube_candidates": [_candidate_cube_report(candidate) for candidate in valid_cube_candidates],
+        "physical_cube_clusters": [
+            _merged_candidate_cube_report(cluster) for cluster in physical_cube_clusters
+        ],
+        "merged_cube_candidates": [
+            _merged_candidate_cube_report(merged) for merged in merged_cube_candidates
+        ],
+        "physical_cube_candidates": [_candidate_cube_report(candidate) for candidate in physical_cube_candidates],
+        "detected_cube_candidates": [_candidate_cube_report(candidate) for candidate in cube_candidates],
+        "detected_tag_candidates": [_candidate_tag_report(candidate) for candidate in tag_candidates],
+        "selected_cube_instance_indices": [int(candidate.instance_index) for candidate in selected_cubes],
+        "selected_physical_candidate_indices": [int(candidate.instance_index) for candidate in selected_cubes],
+        "selected_tag_instance_indices": [int(candidate.instance_index) for candidate in selected_tags],
+        "distance_matrix_m": selection.distance_matrix.tolist(),
+        "pair_distances_m": [float(distance) for distance in selection.pair_distances],
+        "total_assignment_distance_m": float(selection.total_distance_m),
+        "assignment_objective": float(selection.objective),
+        "assignment": assignment_rows,
+    }
+    return assignments, group_report
+
+
+def _slot_as_tag_candidate(slot: PresetSlot) -> DuplicateTagCandidate:
+    T_robot_slot = np.eye(4, dtype=np.float64)
+    T_robot_slot[:3, :3] = _top_down_rotation(math.radians(float(slot.yaw_deg)))
+    T_robot_slot[:3, 3] = slot.center_robot
+    return DuplicateTagCandidate(
+        tag_id=int(slot.slot_id),
+        instance_index=int(slot.slot_id),
+        detection_index=int(slot.slot_id),
+        decision_margin=0.0,
+        hamming=0,
+        T_robot_tag=T_robot_slot,
+        T_cam_tag=T_robot_slot.copy(),
+        center_robot=slot.center_robot,
+    )
+
+
+def _build_preset_assignments_for_group(
+    group_index: int,
+    group: PresetCubeGroup,
+    cube_candidates: list[DuplicateCubeCandidate],
+    slots: list[PresetSlot],
+    candidate_x_min_m: float,
+    candidate_x_max_m: float,
+    candidate_y_min_m: float,
+    candidate_y_max_m: float,
+    candidate_z_min_m: float,
+    candidate_z_max_m: float,
+    candidate_min_area_px: int,
+    red_candidate_min_area_px: int,
+    green_candidate_min_area_px: int,
+    blue_candidate_min_area_px: int,
+    candidate_min_extent_m: float,
+    candidate_max_extent_m: float,
+    candidate_merge_distance_m: float,
+    next_execution_index: int,
+    T_cam_robot: np.ndarray,
+    preset_use_slot_yaw: bool,
+) -> tuple[list[PresetAssignedPair], dict[str, Any]]:
+    _print_duplicate_cube_candidates(
+        DuplicateCubeTagGroup(cube_prompt=group.cube_prompt, tag_id=0, count=group.count),
+        cube_candidates,
+    )
+    print(f"Preset slots for {group.cube_prompt!r}: " + ", ".join(str(slot.slot_id) for slot in slots))
+    valid_cube_candidates, rejected_cube_candidates = filter_duplicate_cube_candidates(
+        candidates=cube_candidates,
+        x_min_m=candidate_x_min_m,
+        x_max_m=candidate_x_max_m,
+        y_min_m=candidate_y_min_m,
+        y_max_m=candidate_y_max_m,
+        z_min_m=candidate_z_min_m,
+        z_max_m=candidate_z_max_m,
+        min_area_px=candidate_min_area_px,
+        red_min_area_px=red_candidate_min_area_px,
+        green_min_area_px=green_candidate_min_area_px,
+        blue_min_area_px=blue_candidate_min_area_px,
+        min_extent_m=candidate_min_extent_m,
+        max_extent_m=candidate_max_extent_m,
+    )
+    _print_rejected_duplicate_cube_candidates(rejected_cube_candidates)
+    physical_cube_candidates, physical_cube_clusters = merge_duplicate_cube_candidates(
+        candidates=valid_cube_candidates,
+        merge_distance_m=candidate_merge_distance_m,
+        T_cam_robot=T_cam_robot,
+    )
+    _print_merged_duplicate_cube_candidates(physical_cube_clusters)
+    print(
+        f"Preset cube candidate filter for {group.cube_prompt!r}:"
+        f" raw={len(cube_candidates)}"
+        f" rejected={len(rejected_cube_candidates)}"
+        f" valid={len(valid_cube_candidates)}"
+        f" clusters={len(physical_cube_clusters)}"
+        f" physical={len(physical_cube_candidates)}"
+    )
+    if len(physical_cube_candidates) < group.count:
+        raise RuntimeError(
+            f"Insufficient physical cube candidates for preset group {group.cube_prompt!r}: "
+            f"need {group.count}, found {len(physical_cube_candidates)}."
+        )
+
+    selection = select_preset_assignment_subset(
+        cube_candidates=physical_cube_candidates,
+        slots=slots,
+        count=group.count,
+    )
+    selected_cubes = selection.selected_cubes
+    selected_slots = selection.selected_slots
+    print(f"Selected cube candidates for preset {group.cube_prompt!r}: " + ", ".join(f"#{candidate.instance_index}" for candidate in selected_cubes))
+    print(f"Selected preset slots for {group.cube_prompt!r}: " + ", ".join(f"{slot.slot_id}" for slot in selected_slots))
+    _print_preset_distance_matrix(group, selected_cubes, selected_slots, selection.distance_matrix)
+    print(
+        "Final preset pair distances mm:"
+        f" {[round(distance * 1000.0, 1) for distance in selection.pair_distances]}"
+        f" total={selection.total_distance_m * 1000.0:.1f}"
+        f" objective={selection.objective:.6f}"
+    )
+
+    assignments: list[PresetAssignedPair] = []
+    assignment_rows: list[dict[str, Any]] = []
+    for cube_order_index, slot_order_index in enumerate(selection.slot_permutation):
+        cube = selected_cubes[cube_order_index]
+        slot = selected_slots[slot_order_index]
+        T_robot_place = _preset_place_pose_from_slot(
+            T_base_cube=cube.T_robot_cube,
+            slot=slot,
+            preset_use_slot_yaw=preset_use_slot_yaw,
+        )
+        T_cam_place = T_cam_robot @ T_robot_place
+        execution_index = next_execution_index + len(assignments)
+        assignment = PresetAssignedPair(
+            execution_index=execution_index,
+            group_index=group_index,
+            within_group_index=cube_order_index + 1,
+            cube_prompt=group.cube_prompt,
+            cube=cube,
+            slot=slot,
+            tag=_slot_as_tag_candidate(slot),
+            distance_m=float(selection.pair_distances[cube_order_index]),
+            T_robot_place=T_robot_place,
+            T_cam_place=T_cam_place,
+            preset_use_slot_yaw=bool(preset_use_slot_yaw),
+        )
+        assignments.append(assignment)
+        assignment_rows.append(
+            {
+                "cube_instance_index": int(cube.instance_index),
+                "slot_id": int(slot.slot_id),
+                "distance_m": float(selection.pair_distances[cube_order_index]),
+            }
+        )
+
+    group_report = {
+        "group_index": int(group_index),
+        "cube_prompt": group.cube_prompt,
+        "count": int(group.count),
+        "slot_ids": [int(slot.slot_id) for slot in slots],
+        "raw_cube_candidates": [_candidate_cube_report(candidate) for candidate in cube_candidates],
+        "rejected_cube_candidates": [
+            _rejected_candidate_cube_report(rejected) for rejected in rejected_cube_candidates
+        ],
+        "valid_cube_candidates": [_candidate_cube_report(candidate) for candidate in valid_cube_candidates],
+        "physical_cube_clusters": [
+            _merged_candidate_cube_report(cluster) for cluster in physical_cube_clusters
+        ],
+        "physical_cube_candidates": [_candidate_cube_report(candidate) for candidate in physical_cube_candidates],
+        "selected_cube_instance_indices": [int(candidate.instance_index) for candidate in selected_cubes],
+        "selected_slot_ids": [int(slot.slot_id) for slot in selected_slots],
+        "distance_matrix_m": selection.distance_matrix.tolist(),
+        "pair_distances_m": [float(distance) for distance in selection.pair_distances],
+        "total_assignment_distance_m": float(selection.total_distance_m),
+        "assignment_objective": float(selection.objective),
+        "assignment": assignment_rows,
+    }
+    return assignments, group_report
+
+
+def _duplicate_aware_preflight(
+    args: argparse.Namespace,
+    zed: Any,
+    get_transform_camera_robot: Any,
+    draw_pose_axes_fn: Any,
+    cube_size_m: float,
+) -> tuple[list[DuplicateAssignedPair], list[dict[str, Any]], Path | None]:
+    image, point_cloud = _checkpoint8_capture_frame(zed)
+    if image is None or point_cloud is None:
+        raise RuntimeError("Camera data is not ready.")
+
+    camera_intrinsic = zed.camera_intrinsic
+    T_cam_robot = get_transform_camera_robot(image, camera_intrinsic)
+    if T_cam_robot is None:
+        raise RuntimeError("Camera-to-robot calibration failed.")
+
+    groups = _duplicate_groups_from_args(args)
+    assignments: list[DuplicateAssignedPair] = []
+    group_reports: list[dict[str, Any]] = []
+    print("\nRunning duplicate-aware multi-place preflight.")
+    print(f"Assignment metric: {args.assignment_metric}")
+    print(f"Assignment space: {args.assignment_space}")
+    print(f"Max assignment distance: {float(args.max_assignment_distance_m) * 1000.0:.1f} mm")
+    candidate_merge_prompts = parse_candidate_merge_prompts(args.candidate_merge_prompts)
+    print(
+        "duplicate-aware mode clusters all colors into physical cube instances; "
+        "--candidate_merge_prompts is ignored."
+    )
+    print(f"Ignored candidate_merge_prompts value: {candidate_merge_prompts}")
+
+    for group_index, group in enumerate(groups, start=1):
+        print(f"\nDuplicate-aware group {group_index}/{len(groups)}: {group.cube_prompt!r} -> tag {group.tag_id} x {group.count}")
+        cube_candidates = _detect_duplicate_cube_candidates(
+            image=image,
+            point_cloud=point_cloud,
+            T_cam_robot=T_cam_robot,
+            cube_prompt=group.cube_prompt,
+            cube_size_m=cube_size_m,
+            table_z_m=args.table_z_m,
+            point_cloud_scale=args.point_cloud_scale,
+        )
+        tag_candidates = _detect_duplicate_target_tag_candidates(
+            image=image,
+            camera_intrinsic=camera_intrinsic,
+            T_cam_robot=T_cam_robot,
+            target_tag_id=group.tag_id,
+            target_tag_size_m=args.target_tag_size_m,
+        )
+        group_assignments, group_report = _build_duplicate_assignments_for_group(
+            group_index=group_index,
+            group=group,
+            cube_candidates=cube_candidates,
+            tag_candidates=tag_candidates,
+            max_assignment_distance_m=args.max_assignment_distance_m,
+            candidate_x_min_m=args.candidate_x_min_m,
+            candidate_x_max_m=args.candidate_x_max_m,
+            candidate_y_min_m=args.candidate_y_min_m,
+            candidate_y_max_m=args.candidate_y_max_m,
+            candidate_z_min_m=args.candidate_z_min_m,
+            candidate_z_max_m=args.candidate_z_max_m,
+            candidate_min_area_px=args.candidate_min_area_px,
+            red_candidate_min_area_px=args.red_candidate_min_area_px,
+            green_candidate_min_area_px=args.green_candidate_min_area_px,
+            blue_candidate_min_area_px=args.blue_candidate_min_area_px,
+            candidate_min_extent_m=args.candidate_min_extent_m,
+            candidate_max_extent_m=args.candidate_max_extent_m,
+            candidate_merge_distance_m=args.candidate_merge_distance_m,
+            candidate_merge_prompts=candidate_merge_prompts,
+            next_execution_index=len(assignments) + 1,
+            T_cam_robot=T_cam_robot,
+        )
+        assignments.extend(group_assignments)
+        group_reports.append(group_report)
+
+    _print_duplicate_assignment_table(assignments)
+    _print_duplicate_execution_order(assignments)
+
+    display = _draw_duplicate_assignment_preview(
+        image=image,
+        camera_intrinsic=camera_intrinsic,
+        assignments=assignments,
+        cube_size_m=cube_size_m,
+        target_tag_size_m=args.target_tag_size_m,
+        draw_pose_axes_fn=draw_pose_axes_fn,
+    )
+    preview_path = _save_preview_image(display, DUPLICATE_ASSIGNMENT_PREVIEW_PATH)
+    if preview_path is not None:
+        print(f"Saved duplicate-aware assignment preview: {preview_path}")
+
+    if args.save_assignment_report:
+        _save_duplicate_assignment_report(
+            groups=group_reports,
+            assignments=assignments,
+            preview_path=preview_path,
+            plan_paths=None,
+            execution_confirmed=False,
+        )
+    return assignments, group_reports, preview_path
+
+
+def _preset_layout_preflight(
+    args: argparse.Namespace,
+    zed: Any,
+    get_transform_camera_robot: Any,
+    draw_pose_axes_fn: Any,
+    cube_size_m: float,
+) -> tuple[list[PresetAssignedPair], list[dict[str, Any]], Path | None]:
+    image, point_cloud = _checkpoint8_capture_frame(zed)
+    if image is None or point_cloud is None:
+        raise RuntimeError("Camera data is not ready.")
+
+    camera_intrinsic = zed.camera_intrinsic
+    T_cam_robot = get_transform_camera_robot(image, camera_intrinsic)
+    if T_cam_robot is None:
+        raise RuntimeError("Camera-to-robot calibration failed.")
+
+    layout = getattr(args, "_preset_layout", None)
+    if layout is None:
+        layout = load_preset_place_layout_json(args.preset_place_layout_json)
+        args._preset_layout = layout
+    groups = _preset_groups_from_args(args)
+    slot_map = _preset_slot_map_from_args(args)
+
+    print("\nRunning preset layout place preflight.")
+    print(f"Layout file path: {args.preset_place_layout_json}")
+    print(f"Loaded preset layout: name={layout.name} frame={layout.frame}")
+    for slot in layout.slots.values():
+        print(
+            f"  slot {slot.slot_id}:"
+            f" x={slot.x * 1000.0:.1f}mm"
+            f" y={slot.y * 1000.0:.1f}mm"
+            f" z={slot.z * 1000.0:.1f}mm"
+            f" yaw={slot.yaw_deg:.1f}deg"
+        )
+    print("Preset cube counts: " + ", ".join(f"{group.cube_prompt}:{group.count}" for group in groups))
+    print(
+        "Preset cube-slot map: "
+        + "; ".join(
+            f"{group.cube_prompt}:{','.join(str(slot_id) for slot_id in slot_map[_normalize_cube_prompt_key(group.cube_prompt)])}"
+            for group in groups
+        )
+    )
+    print(f"Preset assignment metric: {args.preset_assignment_metric}")
+    print(f"Preset use slot yaw: {bool(args.preset_use_slot_yaw)}")
+
+    assignments: list[PresetAssignedPair] = []
+    group_reports: list[dict[str, Any]] = []
+    for group_index, group in enumerate(groups, start=1):
+        prompt_key = _normalize_cube_prompt_key(group.cube_prompt)
+        slots = [layout.slots[int(slot_id)] for slot_id in slot_map[prompt_key]]
+        print(f"\nPreset group {group_index}/{len(groups)}: {group.cube_prompt!r} x {group.count}")
+        cube_candidates = _detect_duplicate_cube_candidates(
+            image=image,
+            point_cloud=point_cloud,
+            T_cam_robot=T_cam_robot,
+            cube_prompt=group.cube_prompt,
+            cube_size_m=cube_size_m,
+            table_z_m=args.table_z_m,
+            point_cloud_scale=args.point_cloud_scale,
+        )
+        group_assignments, group_report = _build_preset_assignments_for_group(
+            group_index=group_index,
+            group=group,
+            cube_candidates=cube_candidates,
+            slots=slots,
+            candidate_x_min_m=args.candidate_x_min_m,
+            candidate_x_max_m=args.candidate_x_max_m,
+            candidate_y_min_m=args.candidate_y_min_m,
+            candidate_y_max_m=args.candidate_y_max_m,
+            candidate_z_min_m=args.candidate_z_min_m,
+            candidate_z_max_m=args.candidate_z_max_m,
+            candidate_min_area_px=args.candidate_min_area_px,
+            red_candidate_min_area_px=args.red_candidate_min_area_px,
+            green_candidate_min_area_px=args.green_candidate_min_area_px,
+            blue_candidate_min_area_px=args.blue_candidate_min_area_px,
+            candidate_min_extent_m=args.candidate_min_extent_m,
+            candidate_max_extent_m=args.candidate_max_extent_m,
+            candidate_merge_distance_m=args.candidate_merge_distance_m,
+            next_execution_index=len(assignments) + 1,
+            T_cam_robot=T_cam_robot,
+            preset_use_slot_yaw=args.preset_use_slot_yaw,
+        )
+        assignments.extend(group_assignments)
+        group_reports.append(group_report)
+
+    _print_preset_assignment_table(assignments)
+    _print_preset_execution_order(assignments)
+
+    display = _draw_preset_assignment_preview(
+        image=image,
+        camera_intrinsic=camera_intrinsic,
+        assignments=assignments,
+        cube_size_m=cube_size_m,
+        draw_pose_axes_fn=draw_pose_axes_fn,
+    )
+    preview_path = _save_preview_image(display, PRESET_LAYOUT_PREVIEW_PATH)
+    if preview_path is not None:
+        print(f"Saved preset layout assignment preview: {preview_path}")
+
+    _save_preset_assignment_report(
+        layout=layout,
+        groups=group_reports,
+        assignments=assignments,
+        preview_path=preview_path,
+        plan_paths=None,
+        execution_confirmed=False,
+    )
+    return assignments, group_reports, preview_path
+
+
 def _run_checkpoint8_style_multi_subprocess_parent_preflight(
     args: argparse.Namespace,
     cube_tag_pairs: list[CubeTagPair],
@@ -2424,6 +4949,829 @@ def _run_checkpoint8_style_multi_subprocess(args: argparse.Namespace, robot_ip: 
     )
     if failed_pairs:
         raise SystemExit(1)
+
+
+def _append_pose_plan_refinement_args(command: list[str], args: argparse.Namespace) -> None:
+    command.extend(
+        [
+            "--pose_plan_refine_radius_m",
+            f"{float(args.pose_plan_refine_radius_m):.12g}",
+            "--pose_plan_refine_tag_radius_m",
+            f"{float(args.pose_plan_refine_tag_radius_m):.12g}",
+            "--candidate_x_min_m",
+            f"{float(args.candidate_x_min_m):.12g}",
+            "--candidate_x_max_m",
+            f"{float(args.candidate_x_max_m):.12g}",
+            "--candidate_y_min_m",
+            f"{float(args.candidate_y_min_m):.12g}",
+            "--candidate_y_max_m",
+            f"{float(args.candidate_y_max_m):.12g}",
+            "--candidate_z_min_m",
+            f"{float(args.candidate_z_min_m):.12g}",
+            "--candidate_z_max_m",
+            f"{float(args.candidate_z_max_m):.12g}",
+            "--candidate_min_area_px",
+            str(int(args.candidate_min_area_px)),
+            "--red_candidate_min_area_px",
+            str(int(args.red_candidate_min_area_px)),
+            "--green_candidate_min_area_px",
+            str(int(args.green_candidate_min_area_px)),
+            "--blue_candidate_min_area_px",
+            str(int(args.blue_candidate_min_area_px)),
+            "--candidate_min_extent_m",
+            f"{float(args.candidate_min_extent_m):.12g}",
+            "--candidate_max_extent_m",
+            f"{float(args.candidate_max_extent_m):.12g}",
+            "--candidate_merge_distance_m",
+            f"{float(args.candidate_merge_distance_m):.12g}",
+            "--table_z_m",
+            f"{float(args.table_z_m):.12g}",
+            "--point_cloud_scale",
+            f"{float(args.point_cloud_scale):.12g}",
+        ]
+    )
+
+
+def _build_duplicate_pose_plan_refinement_child_command(
+    args: argparse.Namespace,
+    input_plan_path: Path,
+    output_plan_path: Path,
+) -> list[str]:
+    command = [
+        "python",
+        "scripts/run_mini_task.py",
+        "--execution_backend",
+        "checkpoint8_style",
+        "--refine_pose_plan_json",
+        str(input_plan_path),
+        "--refined_pose_plan_output_json",
+        str(output_plan_path),
+        "--target_tag_size_m",
+        _target_tag_size_command_arg(args),
+        "--no_gui",
+    ]
+    _append_pose_plan_refinement_args(command, args)
+    return command
+
+
+def _build_duplicate_pose_plan_robot_child_command(args: argparse.Namespace, plan_path: Path) -> list[str]:
+    command = [
+        "python",
+        "scripts/run_mini_task.py",
+        "--execution_backend",
+        "checkpoint8_style",
+        "--execute_pose_plan_json",
+        str(plan_path),
+        "--no_pose_plan_refine",
+        "--target_tag_size_m",
+        _target_tag_size_command_arg(args),
+        "--min_after_grasp_z_mm",
+        f"{float(args.min_after_grasp_z_mm):.12g}",
+        "--no_gui",
+    ]
+    if args.robot_ip:
+        command.extend(["--robot_ip", str(args.robot_ip)])
+    if args.robot_config and str(args.robot_config) != "config/robot.yaml":
+        command.extend(["--robot_config", str(args.robot_config)])
+    return command
+
+
+def _build_duplicate_pose_plan_child_command(args: argparse.Namespace, plan_path: Path) -> list[str]:
+    return _build_duplicate_pose_plan_robot_child_command(args, plan_path)
+
+
+def _refined_duplicate_pose_plan_path(raw_plan_path: Path) -> Path:
+    return raw_plan_path.with_name(f"{raw_plan_path.stem}_refined{raw_plan_path.suffix}")
+
+
+def _checkpoint8_duplicate_home_precheck(robot_ip: str, gripper_length_mm: float) -> None:
+    arm: Any | None = None
+    try:
+        print("Running checkpoint8-style home precheck before pose-plan children.")
+        arm = _checkpoint8_connect_arm(robot_ip)
+        _checkpoint8_initialize_and_home(arm, gripper_length_mm)
+        print("Home precheck succeeded; no grasp/place motion has been sent by the parent.")
+    finally:
+        if arm is not None:
+            try:
+                arm.disconnect()
+            except Exception as exc:
+                print(f"Warning: failed to disconnect cleanly after home precheck: {exc}")
+
+
+def _confirm_duplicate_aware_parent(args: argparse.Namespace) -> bool:
+    if args.auto_confirm:
+        print("Auto-confirm enabled: executing all assigned placements without interactive confirmation.")
+        return True
+    try:
+        response = input("Type 'k' then Enter to execute all assigned placements, or anything else to cancel: ")
+    except EOFError:
+        print("No terminal input is available. Cancelling before starting child processes.")
+        return False
+    return response.strip().lower() == "k"
+
+
+def _pose_xy_yaw_rad(pose: np.ndarray) -> tuple[float, float, float]:
+    transform = np.asarray(pose, dtype=np.float64)
+    yaw_rad = float(Rotation.from_matrix(transform[:3, :3]).as_euler("xyz", degrees=False)[2])
+    return float(transform[0, 3]), float(transform[1, 3]), yaw_rad
+
+
+def _print_pose_plan_refinement_summary(refinement: PosePlanRefinement) -> None:
+    plan = refinement.plan
+    planned_cube_x, planned_cube_y, planned_cube_yaw = _pose_xy_yaw_rad(plan.T_robot_cube)
+    refined_cube_x, refined_cube_y, refined_cube_yaw = _pose_xy_yaw_rad(refinement.T_robot_cube)
+    planned_target_xy = np.asarray(plan.T_robot_place[:2, 3], dtype=np.float64)
+    refined_target_xy = np.asarray(refinement.T_robot_place[:2, 3], dtype=np.float64)
+
+    print("\nPose-plan local fresh refinement:")
+    print(
+        "  planned cube x/y/yaw:"
+        f" x={planned_cube_x * 1000.0:.1f}mm"
+        f" y={planned_cube_y * 1000.0:.1f}mm"
+        f" yaw={math.degrees(planned_cube_yaw):.1f}deg"
+    )
+    print(
+        "  refined cube x/y/yaw:"
+        f" x={refined_cube_x * 1000.0:.1f}mm"
+        f" y={refined_cube_y * 1000.0:.1f}mm"
+        f" yaw={math.degrees(refined_cube_yaw):.1f}deg"
+    )
+    print(f"  cube refinement delta in mm: {refinement.cube_delta_m * 1000.0:.1f}")
+    print(
+        "  planned target x/y:"
+        f" x={planned_target_xy[0] * 1000.0:.1f}mm"
+        f" y={planned_target_xy[1] * 1000.0:.1f}mm"
+    )
+    print(
+        "  refined target x/y:"
+        f" x={refined_target_xy[0] * 1000.0:.1f}mm"
+        f" y={refined_target_xy[1] * 1000.0:.1f}mm"
+    )
+    print(f"  target refinement delta in mm: {refinement.tag_delta_m * 1000.0:.1f}")
+
+
+def _preset_slot_from_pose_plan(plan: DuplicatePosePlan) -> PresetSlot:
+    if plan.preset_slot is None:
+        raise ValueError("preset-slot pose plan is missing preset_slot data.")
+    slot = _preset_slot_from_json_data(plan.preset_slot, 1)
+    if plan.slot_id is not None and int(plan.slot_id) != int(slot.slot_id):
+        raise ValueError(
+            f"preset-slot pose plan slot_id mismatch: slot_id={plan.slot_id}, preset_slot.slot_id={slot.slot_id}."
+        )
+    return slot
+
+
+def _refine_duplicate_pose_plan_from_frame(
+    args: argparse.Namespace,
+    plan: DuplicatePosePlan,
+    image: np.ndarray,
+    point_cloud: np.ndarray,
+    camera_intrinsic: np.ndarray,
+    T_cam_robot: np.ndarray,
+    cube_size_m: float,
+) -> PosePlanRefinement:
+    print("Re-detecting duplicate-aware physical cube candidates for pose-plan refinement.")
+    cube_candidates = _detect_duplicate_cube_candidates(
+        image=image,
+        point_cloud=point_cloud,
+        T_cam_robot=T_cam_robot,
+        cube_prompt=plan.cube_prompt,
+        cube_size_m=cube_size_m,
+        table_z_m=args.table_z_m,
+        point_cloud_scale=args.point_cloud_scale,
+    )
+    valid_cube_candidates, rejected_cube_candidates = filter_duplicate_cube_candidates(
+        candidates=cube_candidates,
+        x_min_m=args.candidate_x_min_m,
+        x_max_m=args.candidate_x_max_m,
+        y_min_m=args.candidate_y_min_m,
+        y_max_m=args.candidate_y_max_m,
+        z_min_m=args.candidate_z_min_m,
+        z_max_m=args.candidate_z_max_m,
+        min_area_px=args.candidate_min_area_px,
+        red_min_area_px=args.red_candidate_min_area_px,
+        green_min_area_px=args.green_candidate_min_area_px,
+        blue_min_area_px=args.blue_candidate_min_area_px,
+        min_extent_m=args.candidate_min_extent_m,
+        max_extent_m=args.candidate_max_extent_m,
+    )
+    _print_rejected_duplicate_cube_candidates(rejected_cube_candidates)
+    physical_cube_candidates, physical_cube_clusters = merge_duplicate_cube_candidates(
+        candidates=valid_cube_candidates,
+        merge_distance_m=args.candidate_merge_distance_m,
+        T_cam_robot=T_cam_robot,
+    )
+    _print_merged_duplicate_cube_candidates(physical_cube_clusters)
+    print(
+        "Pose-plan refinement cube candidates:"
+        f" raw={len(cube_candidates)}"
+        f" rejected={len(rejected_cube_candidates)}"
+        f" valid={len(valid_cube_candidates)}"
+        f" physical={len(physical_cube_candidates)}"
+    )
+    refined_cube, cube_delta_m = select_nearest_refined_candidate(
+        candidates=physical_cube_candidates,
+        planned_xy_m=plan.T_robot_cube[:2, 3],
+        max_distance_m=args.pose_plan_refine_radius_m,
+        label="cube",
+    )
+
+    T_robot_cube = refined_cube.T_robot_cube.copy()
+    if plan.target_source == "preset_slot":
+        print("Preset slot target: skipping target AprilTag refinement.")
+        slot = _preset_slot_from_pose_plan(plan)
+        T_robot_place = _preset_place_pose_from_slot(
+            T_base_cube=T_robot_cube,
+            slot=slot,
+            preset_use_slot_yaw=plan.preset_use_slot_yaw,
+        )
+        refinement = PosePlanRefinement(
+            plan=plan,
+            refined_cube=refined_cube,
+            refined_tag=None,
+            T_robot_cube=T_robot_cube,
+            T_robot_place=T_robot_place,
+            cube_delta_m=float(cube_delta_m),
+            tag_delta_m=0.0,
+        )
+        _print_pose_plan_refinement_summary(refinement)
+        return refinement
+
+    print("Re-detecting target tag candidates for pose-plan refinement.")
+    tag_candidates = _detect_duplicate_target_tag_candidates(
+        image=image,
+        camera_intrinsic=camera_intrinsic,
+        T_cam_robot=T_cam_robot,
+        target_tag_id=plan.target_tag_id,
+        target_tag_size_m=args.target_tag_size_m,
+    )
+    _print_duplicate_tag_candidates(
+        DuplicateCubeTagGroup(cube_prompt=plan.cube_prompt, tag_id=plan.target_tag_id, count=1),
+        tag_candidates,
+    )
+    refined_tag, tag_delta_m = select_nearest_refined_candidate(
+        candidates=tag_candidates,
+        planned_xy_m=plan.T_robot_place[:2, 3],
+        max_distance_m=args.pose_plan_refine_tag_radius_m,
+        label="target tag",
+    )
+
+    T_robot_place = _checkpoint8_target_pose_from_tag(T_robot_cube, refined_tag.T_robot_tag)
+    refinement = PosePlanRefinement(
+        plan=plan,
+        refined_cube=refined_cube,
+        refined_tag=refined_tag,
+        T_robot_cube=T_robot_cube,
+        T_robot_place=T_robot_place,
+        cube_delta_m=float(cube_delta_m),
+        tag_delta_m=float(tag_delta_m),
+    )
+    _print_pose_plan_refinement_summary(refinement)
+    return refinement
+
+
+def _run_checkpoint8_pose_plan_refinement(args: argparse.Namespace, plan: DuplicatePosePlan) -> PosePlanRefinement:
+    from checkpoint0 import get_transform_camera_robot
+    from checkpoint6 import CUBE_SIZE
+    from utils.zed_camera import ZedCamera as CheckpointZedCamera
+
+    zed: Any | None = None
+    try:
+        print("Opening live ZED camera for pose-plan local fresh refinement...")
+        zed = CheckpointZedCamera()
+        image, point_cloud = _checkpoint8_capture_frame(zed)
+        if image is None or point_cloud is None:
+            raise RuntimeError("Camera data is not ready for pose-plan refinement.")
+
+        camera_intrinsic = zed.camera_intrinsic
+        print("Computing camera-to-robot transform with checkpoint0 for pose-plan refinement.")
+        T_cam_robot = get_transform_camera_robot(image, camera_intrinsic)
+        if T_cam_robot is None:
+            raise RuntimeError("Camera-to-robot calibration failed during pose-plan refinement.")
+
+        return _refine_duplicate_pose_plan_from_frame(
+            args=args,
+            plan=plan,
+            image=image,
+            point_cloud=point_cloud,
+            camera_intrinsic=camera_intrinsic,
+            T_cam_robot=T_cam_robot,
+            cube_size_m=CUBE_SIZE,
+        )
+    finally:
+        if zed is not None:
+            zed.close()
+        if (not args.no_gui) and _gui_display_available():
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error as exc:
+                print(f"Warning: failed to destroy OpenCV windows cleanly: {exc}")
+
+
+def _duplicate_pose_plan_from_refinement(refinement: PosePlanRefinement) -> DuplicatePosePlan:
+    plan = refinement.plan
+    return DuplicatePosePlan(
+        execution_index=plan.execution_index,
+        cube_prompt=plan.cube_prompt,
+        target_tag_id=plan.target_tag_id,
+        cube_instance_index=plan.cube_instance_index,
+        tag_instance_index=plan.tag_instance_index,
+        T_robot_cube=refinement.T_robot_cube,
+        T_robot_place=refinement.T_robot_place,
+        target_source=plan.target_source,
+        slot_id=plan.slot_id,
+        preset_slot=dict(plan.preset_slot) if plan.preset_slot is not None else None,
+        preset_use_slot_yaw=plan.preset_use_slot_yaw,
+    )
+
+
+def _exit_refinement_subprocess(returncode: int) -> None:
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(int(returncode))
+
+
+def _run_checkpoint8_refine_pose_plan_json(args: argparse.Namespace) -> None:
+    try:
+        plan = _load_duplicate_pose_plan_json(args.refine_pose_plan_json)
+        print("Using checkpoint8_style pose-plan refinement child.")
+        print(f"Input pose-plan JSON: {args.refine_pose_plan_json}")
+        print(f"Output refined pose-plan JSON: {args.refined_pose_plan_output_json}")
+        print(
+            f"Refining plan pair {plan.execution_index}: {plan.cube_prompt}"
+            f" cube #{plan.cube_instance_index} -> tag {plan.target_tag_id} #{plan.tag_instance_index}"
+        )
+        refinement = _run_checkpoint8_pose_plan_refinement(args, plan)
+        refined_plan = _duplicate_pose_plan_from_refinement(refinement)
+        output_path = _write_duplicate_pose_plan_json(refined_plan, Path(args.refined_pose_plan_output_json))
+        print(f"Wrote refined pose-plan JSON: {output_path}")
+        print("Pose-plan refinement child complete. No Lite6 connection or motion executed.")
+        print("Refined pose-plan JSON written successfully; exiting refinement subprocess with code 0.")
+    except BaseException as exc:
+        print(f"Pose-plan refinement child failed before writing refined JSON: {exc}", file=sys.stderr)
+        _exit_refinement_subprocess(1)
+    _exit_refinement_subprocess(0)
+
+
+def _checkpoint8_tcp_z_meets_minimum(
+    tcp_pose_mm_deg: tuple[float, float, float, float, float, float],
+    min_after_grasp_z_mm: float,
+) -> bool:
+    return float(tcp_pose_mm_deg[2]) >= float(min_after_grasp_z_mm)
+
+
+def _checkpoint8_read_status_and_tcp_pose(
+    arm: Any,
+    label: str,
+) -> tuple[int, int, int, tuple[float, float, float, float, float, float]]:
+    state_value, state_raw = _read_arm_value(arm, "get_state")
+    err_warn_value, err_warn_raw = _read_arm_value(arm, "get_err_warn_code")
+    position_value, position_raw = _read_arm_value(arm, "get_position")
+
+    state = _as_int_status(state_value, "state")
+    err, warn = _parse_err_warn(err_warn_value)
+    tcp_pose = _parse_pose_response_mm_deg(position_value, "TCP pose")
+
+    print(f"xArm status {label}:")
+    print(f"  get_state(): {state_raw!r}")
+    print(f"  get_err_warn_code(): {err_warn_raw!r}")
+    print(f"  get_position(): {position_raw!r}")
+    return state, err, warn, tcp_pose
+
+
+def _checkpoint8_stop_gripper_if_motion_safe(arm: Any, state: int | None, err: int | None, warn: int | None) -> None:
+    if not _checkpoint8_status_ready(state, err, warn):
+        print("Skipping gripper stop because xArm status is not ready.")
+        return
+    try:
+        _stop_gripper_if_supported(arm, "pose-plan safety abort")
+    except Exception as exc:
+        print(f"Warning: failed to stop gripper during pose-plan safety abort: {exc}")
+
+
+def _raise_pose_plan_recovery_abort(message: str) -> None:
+    print(message)
+    print("Run --recover_robot, then --home_only before retrying.")
+    raise PosePlanSafetyAbort(message)
+
+
+def _checkpoint8_validate_tcp_ready_height(
+    arm: Any,
+    label: str,
+    min_after_grasp_z_mm: float,
+    abnormal_height_message: str,
+) -> None:
+    state, err, warn, tcp_pose = _checkpoint8_read_status_and_tcp_pose(arm, label)
+    if not _checkpoint8_tcp_z_meets_minimum(tcp_pose, min_after_grasp_z_mm):
+        print(
+            f"TCP z safety check failed {label}:"
+            f" z={tcp_pose[2]:.1f}mm"
+            f" min={float(min_after_grasp_z_mm):.1f}mm"
+        )
+        _checkpoint8_stop_gripper_if_motion_safe(arm, state, err, warn)
+        _raise_pose_plan_recovery_abort(abnormal_height_message)
+    if _checkpoint8_status_ready(state, err, warn):
+        return
+    if state == 4 or err in (22, 31):
+        _raise_pose_plan_recovery_abort(
+            "Robot is in STOP/C22/C31 after checkpoint8-style motion."
+        )
+    _raise_pose_plan_recovery_abort(
+        f"Lite6 is not ready {label}: {_checkpoint8_status_bad_message(state, err, warn)}"
+    )
+
+
+def _execute_checkpoint8_pose_plan_grasp_place(
+    arm: Any,
+    execution_index: int,
+    T_robot_cube: np.ndarray,
+    T_robot_place: np.ndarray,
+    grasp_cube_fn: Any,
+    place_cube_fn: Any,
+    min_after_grasp_z_mm: float,
+) -> None:
+    print(f"Calling checkpoint1.grasp_cube for pose-plan pair {execution_index}.")
+    grasp_cube_fn(arm, T_robot_cube)
+    print(f"Robot state after grasp_cube for pose-plan pair {execution_index}:")
+    abnormal_height_message = "Abnormal grasp/retreat height after grasp_cube; not calling place_cube."
+    _checkpoint8_validate_tcp_ready_height(
+        arm=arm,
+        label=f"after checkpoint1.grasp_cube pose-plan pair {execution_index}",
+        min_after_grasp_z_mm=min_after_grasp_z_mm,
+        abnormal_height_message=abnormal_height_message,
+    )
+
+    print(f"Pre-place safety check for pose-plan pair {execution_index}:")
+    _checkpoint8_validate_tcp_ready_height(
+        arm=arm,
+        label=f"before checkpoint1.place_cube pose-plan pair {execution_index}",
+        min_after_grasp_z_mm=min_after_grasp_z_mm,
+        abnormal_height_message=abnormal_height_message,
+    )
+
+    print(f"Calling checkpoint1.place_cube for pose-plan pair {execution_index}.")
+    place_cube_fn(arm, T_robot_place)
+    print(f"Robot state after place_cube for pose-plan pair {execution_index}:")
+    _checkpoint8_require_ready(arm, f"after checkpoint1.place_cube pose-plan pair {execution_index}")
+
+
+def _run_checkpoint8_pose_plan_child(args: argparse.Namespace, robot_ip: str) -> None:
+    if args.skip_home or args.no_final_home:
+        raise SystemExit(
+            "checkpoint8_style pose-plan execution requires start and final home. "
+            "Remove --skip_home/--no_final_home."
+        )
+
+    plan = _load_duplicate_pose_plan_json(args.execute_pose_plan_json)
+    print("Using checkpoint8_style pose-plan JSON child execution.")
+    print(f"Pose-plan JSON: {args.execute_pose_plan_json}")
+    if plan.target_source == "preset_slot":
+        print(
+            f"Plan pair {plan.execution_index}: {plan.cube_prompt}"
+            f" cube #{plan.cube_instance_index} -> preset slot {plan.slot_id}"
+        )
+    else:
+        print(
+            f"Plan pair {plan.execution_index}: {plan.cube_prompt}"
+            f" cube #{plan.cube_instance_index} -> tag {plan.target_tag_id} #{plan.tag_instance_index}"
+        )
+    _checkpoint8_print_transform("Pose-plan source cube pose", plan.T_robot_cube)
+    _checkpoint8_print_transform("Pose-plan target place pose", plan.T_robot_place)
+
+    T_robot_cube = plan.T_robot_cube
+    T_robot_place = plan.T_robot_place
+    if args.no_pose_plan_refine:
+        print("Robot-only pose-plan child: --no_pose_plan_refine set; skipping ZED/perception refinement.")
+    if args.execute_pose_plan_refine_only or args.pose_plan_refine_before_execute:
+        refinement = _run_checkpoint8_pose_plan_refinement(args, plan)
+        T_robot_cube = refinement.T_robot_cube
+        T_robot_place = refinement.T_robot_place
+        _checkpoint8_print_transform("Refined pose-plan source cube pose", T_robot_cube)
+        _checkpoint8_print_transform("Refined pose-plan target place pose", T_robot_place)
+
+    if args.execute_pose_plan_refine_only:
+        print("Pose-plan refine-only diagnostic complete. No Lite6 connection or motion executed.")
+        return
+
+    if args.dry_run:
+        print("Dry run selected for pose-plan child. No Lite6 connection or motion executed.")
+        return
+
+    from checkpoint1 import GRIPPER_LENGTH, grasp_cube, place_cube
+
+    arm: Any | None = None
+    initial_home_ok = False
+    task_started = False
+    task_success = False
+    pose_plan_safety_abort = False
+    try:
+        arm = _checkpoint8_connect_arm(robot_ip)
+        _checkpoint8_initialize_and_home(arm, GRIPPER_LENGTH)
+        _checkpoint8_require_home_ready(arm, "after pose-plan initial move_gohome")
+        initial_home_ok = True
+
+        task_started = True
+        try:
+            _execute_checkpoint8_pose_plan_grasp_place(
+                arm=arm,
+                execution_index=plan.execution_index,
+                T_robot_cube=T_robot_cube,
+                T_robot_place=T_robot_place,
+                grasp_cube_fn=grasp_cube,
+                place_cube_fn=place_cube,
+                min_after_grasp_z_mm=args.min_after_grasp_z_mm,
+            )
+        except PosePlanSafetyAbort:
+            pose_plan_safety_abort = True
+            raise SystemExit(1)
+
+        _checkpoint8_move_home_required(arm, f"after pose-plan pair {plan.execution_index}")
+        task_success = True
+        print(f"Pose-plan pair {plan.execution_index} complete and robot returned home.")
+    finally:
+        if arm is not None:
+            if not pose_plan_safety_abort:
+                try:
+                    state, err, warn = _checkpoint8_print_status(arm, "before pose-plan cleanup gripper stop")
+                    _checkpoint8_stop_gripper_if_motion_safe(arm, state, err, warn)
+                except Exception as exc:
+                    print(f"Warning: failed to stop gripper cleanly: {exc}")
+            if initial_home_ok and task_started and not task_success:
+                print(
+                    "Pose-plan task did not complete successfully; not sending extra home motion. "
+                    "Run --recover_robot, then --home_only before retrying."
+                )
+            try:
+                arm.disconnect()
+            except Exception as exc:
+                print(f"Warning: failed to disconnect cleanly: {exc}")
+
+
+def _run_duplicate_pose_plan_child_subprocesses(
+    args: argparse.Namespace,
+    assignments: list[DuplicateAssignedPair],
+    plan_paths: dict[int, Path],
+    subprocess_run_fn: Any | None = None,
+) -> tuple[list[DuplicateAssignedPair], list[DuplicateAssignedPair]]:
+    if subprocess_run_fn is None:
+        subprocess_run_fn = subprocess.run
+
+    succeeded: list[DuplicateAssignedPair] = []
+    failed: list[DuplicateAssignedPair] = []
+
+    for assignment in assignments:
+        raw_plan_path = plan_paths[assignment.execution_index]
+        refined_plan_path = _refined_duplicate_pose_plan_path(raw_plan_path)
+        refinement_command = _build_duplicate_pose_plan_refinement_child_command(
+            args=args,
+            input_plan_path=raw_plan_path,
+            output_plan_path=refined_plan_path,
+        )
+        robot_command = _build_duplicate_pose_plan_robot_child_command(args, refined_plan_path)
+        target_label = (
+            f"slot {assignment.slot.slot_id}"
+            if hasattr(assignment, "slot")
+            else f"tag {assignment.tag_id} #{assignment.tag.instance_index}"
+        )
+
+        print(
+            f"\nStarting pose-plan pair {assignment.execution_index}/{len(assignments)}:"
+            f" {assignment.cube_prompt} cube #{assignment.cube.instance_index}"
+            f" -> {target_label}"
+        )
+        print(f"Raw pose-plan path: {raw_plan_path}")
+        print(f"Refined pose-plan path: {refined_plan_path}")
+        print(f"Refinement child command: {_format_command_for_log(refinement_command)}")
+
+        refinement_completed = subprocess_run_fn(refinement_command, cwd=str(REPO_ROOT))
+        refinement_returncode = int(refinement_completed.returncode)
+        print(f"Refinement return code: {refinement_returncode}")
+
+        if refinement_returncode != 0:
+            failed.append(assignment)
+            print(
+                f"Pose-plan refinement failed for pair {assignment.execution_index}/{len(assignments)}; "
+                "aborting before robot motion."
+            )
+            if _child_returncode_looks_like_native_crash(refinement_returncode):
+                print("Refinement child crashed, likely native perception stack cleanup.")
+            break
+
+        print(f"Robot child command: {_format_command_for_log(robot_command)}")
+        robot_completed = subprocess_run_fn(robot_command, cwd=str(REPO_ROOT))
+        robot_returncode = int(robot_completed.returncode)
+        print(f"Robot child return code: {robot_returncode}")
+
+        if robot_returncode == 0:
+            succeeded.append(assignment)
+            print(f"Pose-plan pair {assignment.execution_index}/{len(assignments)} succeeded.")
+            continue
+
+        failed.append(assignment)
+        print(f"Pose-plan pair {assignment.execution_index}/{len(assignments)} failed during robot execution.")
+        if _child_returncode_looks_like_native_crash(robot_returncode):
+            print("Robot child crashed.")
+        if not args.continue_on_pair_failure:
+            print("Aborting duplicate-aware run after first failed robot child.")
+            break
+        print("Continuing because --continue_on_pair_failure was provided.")
+
+    return succeeded, failed
+
+
+def _confirm_preset_layout_parent(args: argparse.Namespace) -> bool:
+    if args.auto_confirm:
+        print("Auto-confirm enabled: executing all preset layout placements without interactive confirmation.")
+        return True
+    try:
+        response = input("Type 'k' then Enter to execute all preset layout placements, or anything else to cancel: ")
+    except EOFError:
+        print("No terminal input is available. Cancelling before starting child processes.")
+        return False
+    return response.strip().lower() == "k"
+
+
+def _run_checkpoint8_style_preset_layout_place(args: argparse.Namespace, robot_ip: str) -> None:
+    del robot_ip
+    from checkpoint0 import get_transform_camera_robot
+    from checkpoint6 import CUBE_SIZE
+    from utils.vis_utils import draw_pose_axes as checkpoint_draw_pose_axes
+    from utils.zed_camera import ZedCamera as CheckpointZedCamera
+
+    layout = getattr(args, "_preset_layout", None)
+    if layout is None:
+        layout = load_preset_place_layout_json(args.preset_place_layout_json)
+        args._preset_layout = layout
+    groups = _preset_groups_from_args(args)
+    total_requested = sum(group.count for group in groups)
+    print("Using checkpoint8_style preset layout place mode.")
+    print("Parent process will detect duplicate cube instances and execute concrete preset-slot pose-plan children.")
+    print(f"Requested preset placements: {total_requested}")
+    print(f"Preset layout file path: {args.preset_place_layout_json}")
+    print(f"Preset layout name: {layout.name}")
+    print(f"Preset use slot yaw: {bool(args.preset_use_slot_yaw)}")
+
+    zed: Any | None = None
+    assignments: list[PresetAssignedPair] = []
+    group_reports: list[dict[str, Any]] = []
+    preview_path: Path | None = None
+
+    try:
+        print("Opening live ZED camera with checkpoint8-style pipeline for preset layout preflight...")
+        zed = CheckpointZedCamera()
+        assignments, group_reports, preview_path = _preset_layout_preflight(
+            args=args,
+            zed=zed,
+            get_transform_camera_robot=get_transform_camera_robot,
+            draw_pose_axes_fn=checkpoint_draw_pose_axes,
+            cube_size_m=CUBE_SIZE,
+        )
+    finally:
+        if zed is not None:
+            zed.close()
+        if (not args.no_gui) and _gui_display_available():
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error as exc:
+                print(f"Warning: failed to destroy OpenCV windows cleanly: {exc}")
+
+    if args.dry_run:
+        print("Preset layout dry run selected. Assignment completed; no robot motion or child subprocesses executed.")
+        return
+
+    if not _confirm_preset_layout_parent(args):
+        print("Operator cancelled. No child subprocesses started.")
+        return
+
+    plan_paths = _write_preset_pose_plans(assignments)
+    _save_preset_assignment_report(
+        layout=layout,
+        groups=group_reports,
+        assignments=assignments,
+        preview_path=preview_path,
+        plan_paths=plan_paths,
+        execution_confirmed=True,
+    )
+
+    print(
+        "Skipping parent robot home precheck; each robot-only preset pose-plan child performs "
+        "the checkpoint8 home-start and final-home sequence."
+    )
+    succeeded, failed = _run_duplicate_pose_plan_child_subprocesses(
+        args=args,
+        assignments=assignments,
+        plan_paths=plan_paths,
+    )
+
+    print("\nPreset layout subprocess summary:")
+    print(f"Total assigned pairs: {len(assignments)}")
+    print(f"Succeeded pairs: {len(succeeded)}")
+    print(f"Failed pairs: {len(failed)}")
+    if failed:
+        failed_text = ", ".join(
+            f"{item.cube_prompt} cube #{item.cube.instance_index} -> slot {item.slot.slot_id}"
+            for item in failed
+        )
+        print(f"Failed preset assignments: {failed_text}")
+        raise SystemExit(1)
+    print("Failed preset assignments: none")
+    print("Preset layout task complete: every pose-plan child completed successfully.")
+
+
+def _run_checkpoint8_style_duplicate_aware_multi_place(args: argparse.Namespace, robot_ip: str) -> None:
+    del robot_ip
+    from checkpoint0 import get_transform_camera_robot
+    from checkpoint6 import CUBE_SIZE
+    from utils.vis_utils import draw_pose_axes as checkpoint_draw_pose_axes
+    from utils.zed_camera import ZedCamera as CheckpointZedCamera
+
+    groups = _duplicate_groups_from_args(args)
+    total_requested = sum(group.count for group in groups)
+    print("Using checkpoint8_style duplicate-aware multi-place mode.")
+    print("Parent process will detect duplicate instances once and execute concrete pose-plan children.")
+    print(f"Requested duplicate-aware placements: {total_requested}")
+    print(f"Target tag size assumption for duplicate target tags: {float(args.target_tag_size_m):.4f} m.")
+    if args.multi_subprocess:
+        print("--multi_subprocess accepted; duplicate-aware real execution always uses pose-plan child subprocesses.")
+
+    zed: Any | None = None
+    assignments: list[DuplicateAssignedPair] = []
+    group_reports: list[dict[str, Any]] = []
+    preview_path: Path | None = None
+
+    try:
+        print("Opening live ZED camera with checkpoint8-style pipeline for duplicate-aware preflight...")
+        zed = CheckpointZedCamera()
+        assignments, group_reports, preview_path = _duplicate_aware_preflight(
+            args=args,
+            zed=zed,
+            get_transform_camera_robot=get_transform_camera_robot,
+            draw_pose_axes_fn=checkpoint_draw_pose_axes,
+            cube_size_m=CUBE_SIZE,
+        )
+    finally:
+        if zed is not None:
+            zed.close()
+        if (not args.no_gui) and _gui_display_available():
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error as exc:
+                print(f"Warning: failed to destroy OpenCV windows cleanly: {exc}")
+
+    if args.dry_run or args.debug_duplicate_candidates_only:
+        if args.debug_duplicate_candidates_only:
+            print(
+                "Duplicate candidate debug mode selected. "
+                "Perception, filtering, merging, assignment, preview, and report completed; no robot motion or child subprocesses executed."
+            )
+        else:
+            print("Duplicate-aware dry run selected. Assignment completed; no robot motion or child subprocesses executed.")
+        return
+
+    if not _confirm_duplicate_aware_parent(args):
+        print("Operator cancelled. No child subprocesses started.")
+        return
+
+    plan_paths = _write_duplicate_pose_plans(assignments)
+    if args.save_assignment_report:
+        _save_duplicate_assignment_report(
+            groups=group_reports,
+            assignments=assignments,
+            preview_path=preview_path,
+            plan_paths=plan_paths,
+            execution_confirmed=True,
+        )
+
+    print(
+        "Skipping parent robot home precheck; each robot-only pose-plan child performs "
+        "the checkpoint8 home-start and final-home sequence."
+    )
+    succeeded, failed = _run_duplicate_pose_plan_child_subprocesses(
+        args=args,
+        assignments=assignments,
+        plan_paths=plan_paths,
+    )
+
+    print("\nDuplicate-aware subprocess summary:")
+    print(f"Total assigned pairs: {len(assignments)}")
+    print(f"Succeeded pairs: {len(succeeded)}")
+    print(f"Failed pairs: {len(failed)}")
+    if failed:
+        failed_text = ", ".join(
+            f"{item.cube_prompt} cube #{item.cube.instance_index} -> tag {item.tag_id} #{item.tag.instance_index}"
+            for item in failed
+        )
+        print(f"Failed assignments: {failed_text}")
+        raise SystemExit(1)
+    print("Failed assignments: none")
+    print("Duplicate-aware multi-place task complete: every pose-plan child completed successfully.")
 
 
 def _run_checkpoint8_style_multi_place_to_tags(args: argparse.Namespace, robot_ip: str) -> None:
@@ -2759,6 +6107,18 @@ def main() -> None:
         return
 
     if args.execution_backend == "checkpoint8_style":
+        if args.refine_pose_plan_json:
+            _run_checkpoint8_refine_pose_plan_json(args)
+            return
+        if args.execute_pose_plan_json:
+            _run_checkpoint8_pose_plan_child(args, robot_ip)
+            return
+        if args.preset_layout_place:
+            _run_checkpoint8_style_preset_layout_place(args, robot_ip)
+            return
+        if args.duplicate_aware_multi_place:
+            _run_checkpoint8_style_duplicate_aware_multi_place(args, robot_ip)
+            return
         if args.multi_place_to_tags:
             if args.multi_subprocess and not args.dry_run:
                 _run_checkpoint8_style_multi_subprocess(args, robot_ip)
